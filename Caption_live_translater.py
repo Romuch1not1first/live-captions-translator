@@ -2,6 +2,7 @@ from __future__ import annotations
 import ctypes
 import time
 import re
+import webbrowser
 from typing import Generator, Iterable, Optional, List, Tuple, Dict
 import threading
 import queue
@@ -776,6 +777,21 @@ class CaptionApp:
         # Place in top-right corner
         self.show_caption_button.place(relx=1.0, rely=0.0, anchor="ne", x=-10, y=10)
         
+        # Reverso button (next to Show button)
+        self.reverso_button = tk.Button(
+            self.root,
+            text="Reverso",
+            font=("Segoe UI", 8),
+            bg="lightgreen",
+            fg="darkgreen",
+            command=self._on_reverso_clicked,
+            width=8,
+            height=1,
+            state="disabled"  # Disabled until a word is translated
+        )
+        # Place next to Show button
+        self.reverso_button.place(relx=1.0, rely=0.0, anchor="ne", x=-90, y=10)
+        
         self.status_value = tk.StringVar(value="Ready - Click 'Show Live Caption' to start")
         self.status_bar = ttk.Label(self.root, textvariable=self.status_value, anchor="w")
         self.status_bar.grid(row=1, column=0, sticky="ew")
@@ -802,6 +818,9 @@ class CaptionApp:
         self._word_translations: List[tuple[str, str, str]] = []
         self._words_log_file = f"translated_words_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         
+        # Current translated word for Reverso
+        self.current_translated_word: Optional[str] = None
+        
     def _on_toggle_caption_clicked(self) -> None:
         """Handle the toggle button click - show/hide Live Captions and word detection."""
         if not self.cv_initialized:
@@ -810,6 +829,18 @@ class CaptionApp:
         else:
             # Toggle the system on/off
             self._toggle_cv_system()
+    
+    def _on_reverso_clicked(self) -> None:
+        """Handle the Reverso button click - open Reverso with the translated word."""
+        if self.current_translated_word:
+            # URL encode the word to handle special characters
+            import urllib.parse
+            encoded_word = urllib.parse.quote(self.current_translated_word)
+            url = f"https://www.reverso.net/text-translation#sl=eng&tl=rus&text={encoded_word}"
+            webbrowser.open(url)
+            print(f"Opening Reverso for translated word: {self.current_translated_word}")
+        else:
+            print("No translated word available for Reverso")
 
     def _initialize_cv_system(self) -> None:
         """Initialize the computer vision system and Live Captions window."""
@@ -1027,9 +1058,15 @@ class CaptionApp:
                     # Fallback translation
                     translation = simple_translate_fallback(word, self.target_language)
                 
+                # Store translated word for Reverso
+                self.current_translated_word = translation
+                
                 # Update UI
                 display_text = f"{word} → {translation}"
                 self.root.after(0, lambda: self.word_translation_var.set(display_text))
+                
+                # Enable Reverso button
+                self.root.after(0, lambda: self.reverso_button.config(state="normal"))
                 
                 # Log translation
                 timestamp = time.strftime('%H:%M:%S')
@@ -1037,12 +1074,18 @@ class CaptionApp:
                 self._translated_words[word.lower()] = translation
                 self._word_translations.append((timestamp, word, translation))
                 self.log_handle.flush()
+                
+                print(f"Translation successful: '{word}' -> '{translation}'")
                  
             except Exception as e:
                 print(f"Translation error: {e}")
                 fallback = simple_translate_fallback(word, self.target_language)
                 display_text = f"{word} → {fallback}"
                 self.root.after(0, lambda: self.word_translation_var.set(display_text))
+                
+                # Store fallback translation for Reverso
+                self.current_translated_word = fallback
+                self.root.after(0, lambda: self.reverso_button.config(state="normal"))
         
         # Run translation in background thread
         threading.Thread(target=on_translation_done, args=(word_future,), daemon=True).start()
@@ -1052,7 +1095,7 @@ class CaptionApp:
         try:
             if not self.window_manager:
                 return
-                
+            
             # Get translation window position and size
             translation_x = self.root.winfo_x()
             translation_y = self.root.winfo_y()
@@ -1119,7 +1162,7 @@ class CaptionApp:
             self.positioning_enabled = False
             self.cv_initialized = False
         except Exception:
-                pass
+            pass
         try:
             if self.word_detector:
                 self.word_detector.destroy()
