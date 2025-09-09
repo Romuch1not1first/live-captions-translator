@@ -1122,8 +1122,75 @@ class CaptionApp:
         # Run translation in background thread
         threading.Thread(target=on_translation_done, args=(word_future,), daemon=True).start()
 
+    def _detect_window_corner(self) -> str:
+        """Detect which corner the translation window is in, accounting for multiple monitors."""
+        try:
+            # Get translation window position and size
+            translation_x = self.root.winfo_x()
+            translation_y = self.root.winfo_y()
+            translation_width = self.root.winfo_width()
+            translation_height = self.root.winfo_height()
+            
+            # Calculate window center
+            center_x = translation_x + translation_width // 2
+            center_y = translation_y + translation_height // 2
+            
+            # Get the monitor that contains the window center
+            monitor_info = self._get_monitor_info(center_x, center_y)
+            if not monitor_info:
+                # Fallback to primary screen
+                screen_width = self.root.winfo_screenwidth()
+                screen_height = self.root.winfo_screenheight()
+                monitor_x, monitor_y = 0, 0
+            else:
+                monitor_x, monitor_y, screen_width, screen_height = monitor_info
+            
+            # Convert to monitor-relative coordinates
+            rel_x = center_x - monitor_x
+            rel_y = center_y - monitor_y
+            
+            # Determine corner based on position within the monitor
+            if rel_x < screen_width // 2 and rel_y < screen_height // 2:
+                return "top_left"
+            elif rel_x >= screen_width // 2 and rel_y < screen_height // 2:
+                return "top_right"
+            elif rel_x < screen_width // 2 and rel_y >= screen_height // 2:
+                return "bottom_left"
+            else:
+                return "bottom_right"
+                
+        except Exception as e:
+            print(f"Error detecting window corner: {e}")
+            return "top_left"  # Default to top_left
+    
+    def _get_monitor_info(self, x: int, y: int) -> tuple:
+        """Get monitor information for the given coordinates."""
+        try:
+            import win32api
+            import win32con
+            
+            # Get all monitors
+            monitors = win32api.EnumDisplayMonitors()
+            
+            for monitor in monitors:
+                monitor_handle, device_context, rect = monitor
+                left, top, right, bottom = rect
+                
+                # Check if the point is within this monitor
+                if left <= x < right and top <= y < bottom:
+                    width = right - left
+                    height = bottom - top
+                    return (left, top, width, height)
+            
+            # If not found, return primary monitor info
+            return None
+            
+        except Exception as e:
+            print(f"Error getting monitor info: {e}")
+            return None
+
     def _position_live_captions_window(self) -> None:
-        """Position the Live Captions window directly below the translation window."""
+        """Position the Live Captions window based on translation window corner."""
         try:
             if not self.window_manager:
                 return
@@ -1134,13 +1201,43 @@ class CaptionApp:
             translation_width = self.root.winfo_width()
             translation_height = self.root.winfo_height()
             
-            # Calculate position for Live Captions window (directly below)
-            live_captions_x = translation_x
-            live_captions_y = translation_y + translation_height + 10  # 10px gap
+            # Detect which corner the translation window is in
+            corner = self._detect_window_corner()
+            print(f"Translation window corner detected: {corner}")
+            
+            # Calculate position for Live Captions window based on corner
+            if corner == "top_left":
+                # Position below the translation window
+                live_captions_x = translation_x
+                live_captions_y = translation_y + translation_height + 10
+            elif corner == "top_right":
+                # Position below the translation window
+                live_captions_x = translation_x
+                live_captions_y = translation_y + translation_height + 10
+            elif corner == "bottom_left":
+                # Position above the translation window
+                live_captions_x = translation_x
+                live_captions_y = translation_y - 100  # Above the window
+            else:  # bottom_right
+                # Position above the translation window
+                live_captions_x = translation_x
+                live_captions_y = translation_y - 100  # Above the window
+            
+            # Ensure the window stays on the same monitor as the translation window
+            monitor_info = self._get_monitor_info(translation_x, translation_y)
+            if monitor_info:
+                monitor_x, monitor_y, monitor_width, monitor_height = monitor_info
+                # Constrain to the monitor bounds
+                live_captions_x = max(monitor_x, min(live_captions_x, monitor_x + monitor_width - 400))
+                live_captions_y = max(monitor_y, min(live_captions_y, monitor_y + monitor_height - 100))
+            else:
+                # Fallback to primary screen
+                live_captions_x = max(0, min(live_captions_x, self.root.winfo_screenwidth() - 400))
+                live_captions_y = max(0, min(live_captions_y, self.root.winfo_screenheight() - 100))
             
             # Move the Live Captions window
             if self.window_manager.move_window(live_captions_x, live_captions_y):
-                print(f"Live Captions window positioned at ({live_captions_x}, {live_captions_y})")
+                print(f"Live Captions window positioned at ({live_captions_x}, {live_captions_y}) for {corner} corner")
                 self.last_translation_window_pos = (translation_x, translation_y, translation_width, translation_height)
             else:
                 print("Failed to position Live Captions window")
@@ -1163,13 +1260,38 @@ class CaptionApp:
                     if self.last_translation_window_pos is None or \
                        self.last_translation_window_pos != (current_x, current_y, current_width, current_height):
                         
-                        # Update Live Captions window position
+                        # Update Live Captions window position based on corner
                         if self.window_manager and self.live_captions_window:
-                            live_captions_x = current_x
-                            live_captions_y = current_y + current_height + 10  # 10px gap
+                            # Detect corner and calculate position
+                            corner = self._detect_window_corner()
+                            
+                            if corner == "top_left":
+                                live_captions_x = current_x
+                                live_captions_y = current_y + current_height + 10
+                            elif corner == "top_right":
+                                live_captions_x = current_x
+                                live_captions_y = current_y + current_height + 10
+                            elif corner == "bottom_left":
+                                live_captions_x = current_x
+                                live_captions_y = current_y - 100
+                            else:  # bottom_right
+                                live_captions_x = current_x
+                                live_captions_y = current_y - 100
+                            
+                            # Ensure the window stays on the same monitor as the translation window
+                            monitor_info = self._get_monitor_info(current_x, current_y)
+                            if monitor_info:
+                                monitor_x, monitor_y, monitor_width, monitor_height = monitor_info
+                                # Constrain to the monitor bounds
+                                live_captions_x = max(monitor_x, min(live_captions_x, monitor_x + monitor_width - 400))
+                                live_captions_y = max(monitor_y, min(live_captions_y, monitor_y + monitor_height - 100))
+                            else:
+                                # Fallback to primary screen
+                                live_captions_x = max(0, min(live_captions_x, self.root.winfo_screenwidth() - 400))
+                                live_captions_y = max(0, min(live_captions_y, self.root.winfo_screenheight() - 100))
                             
                             if self.window_manager.move_window(live_captions_x, live_captions_y):
-                                print(f"Live Captions window repositioned to ({live_captions_x}, {live_captions_y})")
+                                print(f"Live Captions window repositioned to ({live_captions_x}, {live_captions_y}) for {corner} corner")
                                 self.last_translation_window_pos = (current_x, current_y, current_width, current_height)
                                 
                                 # Update overlay window position
