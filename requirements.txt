@@ -1,0 +1,5 @@
+pyautogui
+pygetwindow
+pytesseract
+deep-translator
+pillow
