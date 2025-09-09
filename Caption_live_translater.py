@@ -792,6 +792,21 @@ class CaptionApp:
         # Place next to Show button
         self.reverso_button.place(relx=1.0, rely=0.0, anchor="ne", x=-90, y=10)
         
+        # Cambridge button (next to Reverso button)
+        self.cambridge_button = tk.Button(
+            self.root,
+            text="Cambridge",
+            font=("Segoe UI", 8),
+            bg="lightcoral",
+            fg="darkred",
+            command=self._on_cambridge_clicked,
+            width=8,
+            height=1,
+            state="disabled"  # Disabled until a word is translated
+        )
+        # Place next to Reverso button
+        self.cambridge_button.place(relx=1.0, rely=0.0, anchor="ne", x=-170, y=10)
+        
         self.status_value = tk.StringVar(value="Ready - Click 'Show Live Caption' to start")
         self.status_bar = ttk.Label(self.root, textvariable=self.status_value, anchor="w")
         self.status_bar.grid(row=1, column=0, sticky="ew")
@@ -842,6 +857,18 @@ class CaptionApp:
             print(f"Opening Reverso for English word: {self.current_original_word}")
         else:
             print("No original word available for Reverso")
+    
+    def _on_cambridge_clicked(self) -> None:
+        """Handle the Cambridge button click - open Cambridge Dictionary with the original English word."""
+        if self.current_original_word:
+            # URL encode the word to handle special characters
+            import urllib.parse
+            encoded_word = urllib.parse.quote(self.current_original_word)
+            url = f"https://dictionary.cambridge.org/dictionary/english/{encoded_word}"
+            webbrowser.open(url)
+            print(f"Opening Cambridge Dictionary for English word: {self.current_original_word}")
+        else:
+            print("No original word available for Cambridge Dictionary")
 
     def _initialize_cv_system(self) -> None:
         """Initialize the computer vision system and Live Captions window."""
@@ -1067,8 +1094,9 @@ class CaptionApp:
                 display_text = f"{word} → {translation}"
                 self.root.after(0, lambda: self.word_translation_var.set(display_text))
                 
-                # Enable Reverso button
+                # Enable Reverso and Cambridge buttons
                 self.root.after(0, lambda: self.reverso_button.config(state="normal"))
+                self.root.after(0, lambda: self.cambridge_button.config(state="normal"))
                 
                 # Log translation
                 timestamp = time.strftime('%H:%M:%S')
@@ -1089,6 +1117,7 @@ class CaptionApp:
                 self.current_original_word = word
                 self.current_translated_word = fallback
                 self.root.after(0, lambda: self.reverso_button.config(state="normal"))
+                self.root.after(0, lambda: self.cambridge_button.config(state="normal"))
         
         # Run translation in background thread
         threading.Thread(target=on_translation_done, args=(word_future,), daemon=True).start()
