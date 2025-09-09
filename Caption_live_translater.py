@@ -2,16 +2,21 @@ from __future__ import annotations
 import ctypes
 import time
 import re
-from typing import Generator, Iterable, Optional, List
+from typing import Generator, Iterable, Optional, List, Tuple, Dict
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor, Future
 import tkinter as tk
 from tkinter import ttk
+import math
 
 import pyautogui
 import pygetwindow as gw
 import pytesseract
+import cv2
+import numpy as np
+import win32gui
+import win32con
 
 try:
     # deep-translator is lightweight and reliable
@@ -119,6 +124,71 @@ def clean_captured_text(text: str) -> str:
 
 def find_live_captions_window() -> Optional[gw.Win32Window]:
     return next((w for w in gw.getWindowsWithTitle("Live Captions")), None)
+
+
+class WindowManager:
+    """Manages Live Captions window positioning and movement."""
+    
+    def __init__(self, live_captions_window: gw.Win32Window):
+        self.window = live_captions_window
+        self.hwnd = None
+        
+    def get_hwnd(self) -> Optional[int]:
+        """Get the window handle for the Live Captions window."""
+        if not self.hwnd and self.window:
+            try:
+                self.hwnd = self.window._hWnd
+            except:
+                # Fallback: find window by title
+                self.hwnd = win32gui.FindWindow(None, "Live Captions")
+        return self.hwnd
+    
+    def move_window(self, x: int, y: int) -> bool:
+        """Move the Live Captions window to the specified position."""
+        try:
+            hwnd = self.get_hwnd()
+            if not hwnd:
+                return False
+                
+            # Get current window size
+            rect = win32gui.GetWindowRect(hwnd)
+            width = rect[2] - rect[0]
+            height = rect[3] - rect[1]
+            
+            # Move the window
+            win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, x, y, width, height, 
+                                win32con.SWP_SHOWWINDOW)
+            
+            # Update the pygetwindow object
+            self.window.left = x
+            self.window.top = y
+            
+            return True
+        except Exception as e:
+            print(f"Error moving window: {e}")
+            return False
+    
+    def get_window_position(self) -> Tuple[int, int]:
+        """Get current window position."""
+        try:
+            hwnd = self.get_hwnd()
+            if hwnd:
+                rect = win32gui.GetWindowRect(hwnd)
+                return (rect[0], rect[1])
+        except Exception as e:
+            print(f"Error getting window position: {e}")
+        return (self.window.left, self.window.top) if self.window else (0, 0)
+    
+    def get_window_size(self) -> Tuple[int, int]:
+        """Get current window size."""
+        try:
+            hwnd = self.get_hwnd()
+            if hwnd:
+                rect = win32gui.GetWindowRect(hwnd)
+                return (rect[2] - rect[0], rect[3] - rect[1])
+        except Exception as e:
+            print(f"Error getting window size: {e}")
+        return (self.window.width, self.window.height) if self.window else (0, 0)
 
 
 # --- Core functionality ---
@@ -404,6 +474,223 @@ class CaptionCaptureThread(threading.Thread):
         self._stop_event.set()
 
 
+class WordDetector:
+    """Computer vision-based word detection and bounding box management."""
+    
+    def __init__(self, live_captions_window: gw.Win32Window, window_manager: WindowManager):
+        self.window = live_captions_window
+        self.window_manager = window_manager
+        self.word_boxes: List[Dict] = []  # List of word bounding boxes with metadata
+        self.selected_word: Optional[str] = None
+        self.hovered_word: Optional[str] = None
+        self.overlay_window: Optional[tk.Toplevel] = None
+        self.canvas: Optional[tk.Canvas] = None
+        self.is_active = False
+        
+    def detect_words(self, screenshot: np.ndarray) -> List[Dict]:
+        """Detect words in the Live Captions window and return bounding boxes."""
+        try:
+            print("WordDetector - Starting word detection...")
+            # Convert to grayscale for better OCR
+            gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+            print(f"WordDetector - Image shape: {gray.shape}")
+            
+            # Use pytesseract to get word-level data
+            print("WordDetector - Running OCR...")
+            data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT)
+            print(f"WordDetector - OCR returned {len(data['text'])} text elements")
+            
+            word_boxes = []
+            n_boxes = len(data['text'])
+            
+            for i in range(n_boxes):
+                text = data['text'][i].strip()
+                conf = int(data['conf'][i])
+                
+                # Only process words with reasonable confidence and non-empty text
+                if conf > 30 and text and len(text) > 0:
+                    x = data['left'][i]
+                    y = data['top'][i]
+                    w = data['width'][i]
+                    h = data['height'][i]
+                    
+                    word_boxes.append({
+                        'text': text,
+                        'bbox': (x, y, w, h),
+                        'confidence': conf,
+                        'selected': False
+                    })
+            
+            self.word_boxes = word_boxes
+            return word_boxes
+            
+        except Exception as e:
+            print(f"Error detecting words: {e}")
+            return []
+    
+    def create_overlay_window(self) -> None:
+        """Create a transparent overlay window for interactive bounding boxes."""
+        if not self.window:
+            print("WordDetector - No window reference, cannot create overlay")
+            return
+            
+        print(f"WordDetector - Creating overlay window at ({self.window.left}, {self.window.top}) size {self.window.width}x{self.window.height}")
+        self.overlay_window = tk.Toplevel()
+        self.overlay_window.title("Live Captions - Word Overlay")
+        self.overlay_window.geometry(f"{self.window.width}x{self.window.height}+{self.window.left}+{self.window.top}")
+        
+        # Make window semi-transparent and always on top
+        self.overlay_window.attributes('-alpha', 0.3)  # Semi-transparent so bounding boxes are visible
+        self.overlay_window.attributes('-topmost', True)
+        self.overlay_window.overrideredirect(True)
+        
+        # Create canvas for drawing bounding boxes
+        self.canvas = tk.Canvas(
+            self.overlay_window,
+            width=self.window.width,
+            height=self.window.height,
+            bg='black',
+            highlightthickness=0
+        )
+        self.canvas.pack()
+        
+        # Bind events
+        self.canvas.bind("<Button-1>", self._on_word_click)
+        self.canvas.bind("<Motion>", self._on_mouse_motion)
+        self.canvas.bind("<Leave>", self._on_mouse_leave)
+        
+    def draw_bounding_boxes(self) -> None:
+        """Draw bounding boxes around detected words with hover and selection effects."""
+        if not self.canvas or not self.word_boxes:
+            return
+        
+        # Check if canvas still exists (not destroyed)
+        try:
+            self.canvas.winfo_exists()
+        except tk.TclError:
+            # Canvas was destroyed, skip drawing
+            return
+            
+        # Clear previous drawings
+        self.canvas.delete("all")
+        
+        for word_data in self.word_boxes:
+            x, y, w, h = word_data['bbox']
+            text = word_data['text']
+            selected = word_data.get('selected', False)
+            hovered = (self.hovered_word == text)
+            
+            # Choose colors based on state
+            if selected:
+                outline_color = 'red'
+                fill_color = 'red'
+                fill_alpha = 0.3
+            elif hovered:
+                outline_color = 'orange'
+                fill_color = 'orange'
+                fill_alpha = 0.2
+            else:
+                outline_color = 'blue'
+                fill_color = 'blue'
+                fill_alpha = 0.1
+            
+            # Draw bounding box with fill
+            self.canvas.create_rectangle(
+                x, y, x + w, y + h,
+                outline=outline_color,
+                width=3 if selected else 2,
+                fill=fill_color,
+                tags=f"word_{text}"
+            )
+            
+            # Draw word text for better visibility
+            # Text labels removed for cleaner display
+    
+    def _on_word_click(self, event) -> None:
+        """Handle click events on bounding boxes."""
+        print(f"WordDetector - Word click detected at ({event.x}, {event.y})")
+        if not self.word_boxes:
+            print("WordDetector - No word boxes available")
+            return
+            
+        click_x, click_y = event.x, event.y
+        
+        # Find which word was clicked
+        for word_data in self.word_boxes:
+            x, y, w, h = word_data['bbox']
+            print(f"Checking word '{word_data['text']}' at ({x}, {y}, {w}, {h})")
+            if x <= click_x <= x + w and y <= click_y <= y + h:
+                print(f"Word '{word_data['text']}' clicked!")
+                # Deselect all other words
+                for other_word in self.word_boxes:
+                    other_word['selected'] = False
+                
+                # Select this word
+                word_data['selected'] = True
+                self.selected_word = word_data['text']
+                
+                # Redraw bounding boxes
+                self.draw_bounding_boxes()
+                
+                # Trigger translation
+                if hasattr(self, 'on_word_selected'):
+                    print(f"Calling on_word_selected for '{word_data['text']}'")
+                    self.on_word_selected(word_data['text'])
+                
+                break
+    
+    def _on_mouse_motion(self, event) -> None:
+        """Handle mouse motion events for hover effects."""
+        if not self.word_boxes:
+            return
+            
+        # Find which word is being hovered
+        hovered_word = None
+        for word_data in self.word_boxes:
+            x, y, w, h = word_data['bbox']
+            if x <= event.x <= x + w and y <= event.y <= y + h:
+                hovered_word = word_data['text']
+                break
+        
+        # Update hover state and redraw if changed
+        if self.hovered_word != hovered_word:
+            self.hovered_word = hovered_word
+            self.draw_bounding_boxes()
+    
+    def _on_mouse_leave(self, event) -> None:
+        """Handle mouse leave events."""
+        if self.hovered_word:
+            self.hovered_word = None
+            self.draw_bounding_boxes()
+    
+    def update_window_position(self) -> None:
+        """Update overlay window position to match Live Captions window."""
+        if self.overlay_window and self.window_manager:
+            try:
+                current_x, current_y = self.window_manager.get_window_position()
+                current_width, current_height = self.window_manager.get_window_size()
+                
+                # Update overlay window geometry
+                self.overlay_window.geometry(f"{current_width}x{current_height}+{current_x}+{current_y}")
+                if self.canvas:
+                    self.canvas.configure(width=current_width, height=current_height)
+                
+                # Update the window object coordinates
+                self.window.left = current_x
+                self.window.top = current_y
+                self.window.width = current_width
+                self.window.height = current_height
+                
+            except Exception as e:
+                print(f"Error updating window position: {e}")
+    
+    def destroy(self) -> None:
+        """Clean up the overlay window."""
+        if self.overlay_window:
+            self.overlay_window.destroy()
+            self.overlay_window = None
+
+
 class TranslatorService:
     """Thread-pooled translation service using deep-translator when available."""
 
@@ -436,40 +723,16 @@ class TranslatorService:
         self._pool.shutdown(wait=False, cancel_futures=True)
 
 
-class ScrollableFrame(ttk.Frame):
-    """A simple vertically scrollable frame for accumulating sentence rows."""
-
-    def __init__(self, master: tk.Widget, *args, **kwargs) -> None:
-        super().__init__(master, *args, **kwargs)
-        self.canvas = tk.Canvas(self, highlightthickness=0)
-        self.v_scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.inner = ttk.Frame(self.canvas)
-        self.inner.bind(
-            "<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-        self._inner_window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.v_scroll.set)
-
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.v_scroll.grid(row=0, column=1, sticky="ns")
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-
-        # Resize inner width when the canvas width changes
-        self.canvas.bind(
-            "<Configure>",
-            lambda e: self.canvas.itemconfig(self._inner_window, width=e.width),
-        )
 
 
 class CaptionApp:
-    """Tkinter application displaying live captions with per-word translation on click."""
+    """Computer vision-based live captions translator with interactive word detection."""
 
     def __init__(self, target_language: str = "ru") -> None:
         self.target_language = target_language
         self.root = tk.Tk()
-        self.root.title("Live Captions — Interactive Translator")
-        self.root.geometry("800x250")
+        self.root.title("Live Captions — Computer Vision Translator")
+        self.root.geometry("400x200")
         
         # Setup logging
         self.log_file = f"captions_log_{time.strftime('%Y%m%d_%H%M%S')}.txt"
@@ -479,553 +742,387 @@ class CaptionApp:
         self.log_handle.write("=" * 80 + "\n\n")
         self.log_handle.flush()
 
-        # Single-column layout like Live Captions: sentences stack; each row shows
-        # translation ABOVE the original caption; window is freely resizable.
-        self.root.grid_rowconfigure(1, weight=1)  # Only captions frame should expand
+        # Simple layout - only translation display
+        self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
 
-        # Translation display area above captions
+        # Translation display area
         self.translation_frame = ttk.Frame(self.root)
-        self.translation_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 0))
+        self.translation_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        
+        # Title
+        title_label = tk.Label(self.translation_frame, text="Live Captions Translator", 
+                              font=("Segoe UI", 16, "bold"), fg="darkblue")
+        title_label.pack(pady=(0, 10))
         
         # Translation labels
-        self.word_translation_var = tk.StringVar(value="Click a word to see translation")
+        self.word_translation_var = tk.StringVar(value="Click 'Show Live Caption' to start word tracking")
         self.word_translation_label = tk.Label(self.translation_frame, textvariable=self.word_translation_var, 
-                                             font=("Segoe UI", 10), fg="blue", wraplength=800)
-        self.word_translation_label.pack(anchor="w", pady=(0, 2))
+                                             font=("Segoe UI", 14, "bold"), fg="darkgreen", wraplength=350, 
+                                             justify="center")
+        self.word_translation_label.pack(pady=(0, 10))
         
-        self.sentence_translation_var = tk.StringVar(value="")
-        self.sentence_translation_label = tk.Label(self.translation_frame, textvariable=self.sentence_translation_var, 
-                                                 font=("Segoe UI", 12, "bold"), fg="darkgreen", wraplength=800)
-        self.sentence_translation_label.pack(anchor="w", pady=(0, 4))
-
-        self.captions_frame = ScrollableFrame(self.root)
-        self.captions_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
-
-        self.status_value = tk.StringVar(value="Starting capture…")
+        # Show Live Caption button (small, in corner)
+        self.show_caption_button = tk.Button(
+            self.root,
+            text="Show",
+            font=("Segoe UI", 8),
+            bg="lightblue",
+            fg="darkblue",
+            command=self._on_toggle_caption_clicked,
+            width=8,
+            height=1
+        )
+        # Place in top-right corner
+        self.show_caption_button.place(relx=1.0, rely=0.0, anchor="ne", x=-10, y=10)
+        
+        self.status_value = tk.StringVar(value="Ready - Click 'Show Live Caption' to start")
         self.status_bar = ttk.Label(self.root, textvariable=self.status_value, anchor="w")
-        self.status_bar.grid(row=2, column=0, sticky="ew")
+        self.status_bar.grid(row=1, column=0, sticky="ew")
 
         # Services
-        self.queue: "queue.Queue[str]" = queue.Queue()
-        self.capture_thread = CaptionCaptureThread(self.queue)
         self.translator = TranslatorService(target_language=self.target_language)
+        self.word_detector: Optional[WordDetector] = None
+        self.live_captions_window: Optional[gw.Win32Window] = None
+        self.window_manager: Optional[WindowManager] = None
+        
+        # Computer vision thread
+        self.cv_thread = None
+        self.running = False  # Don't start automatically
+        self.cv_initialized = False  # Track if CV system is initialized
+        
+        # Window positioning tracking
+        self.last_translation_window_pos = None
+        self.positioning_enabled = False  # Don't start positioning automatically
 
-        self._start_capture()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Track labels to update wraplength on resize
-        self._all_wrap_labels: List[tk.Label] = [self.word_translation_label, self.sentence_translation_label]
-
-        # Poll queue for new sentences without blocking UI
-        self._poll_queue()
-
-        # Adjust wraplengths dynamically when window is resized
-        self.root.bind("<Configure>", self._on_resize)
-        
-        # Bind scroll events to detect user scrolling
-        self.captions_frame.canvas.bind("<MouseWheel>", self._on_user_scroll)
-        self.captions_frame.canvas.bind("<Button-4>", self._on_user_scroll)  # Linux scroll up
-        self.captions_frame.canvas.bind("<Button-5>", self._on_user_scroll)  # Linux scroll down
-        self.captions_frame.canvas.bind("<Button-1>", self._on_user_scroll)  # Click and drag
-        self.captions_frame.canvas.bind("<B1-Motion>", self._on_user_scroll)  # Drag motion
-
-        # Keep a small window of recently shown sentences to avoid duplicates
-        self._recent_sentences: List[str] = []
-        self._recent_canon: List[str] = []
-        self._recent_limit: int = 16
-        
-        # Track translated words for separate logging
-        self._translated_words: dict[str, str] = {}  # word -> translation
-        self._word_translations: List[tuple[str, str, str]] = []  # (timestamp, word, translation)
+        # Track translated words for logging
+        self._translated_words: dict[str, str] = {}
+        self._word_translations: List[tuple[str, str, str]] = []
         self._words_log_file = f"translated_words_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         
-        # Sliding window for caption words
-        self._word_buffer: List[str] = []  # Buffer to maintain latest words
-        self._current_display_row = None  # Reference to current display row
-        
-        # Smart scrolling state
-        self._auto_scroll_enabled = True  # Whether auto-scroll is enabled
-        self._last_scroll_position = 1.0  # Last known scroll position (1.0 = bottom)
-        self._user_scrolled = False  # Whether user has manually scrolled
-        
-        # Remove previous logs except translated words
-        self._cleanup_old_logs()
-
-    def _cleanup_old_logs(self) -> None:
-        """Remove previous log files except translated words logs."""
-        try:
-            import glob
-            import os
-            # Find all caption log files in the current directory
-            caption_logs = glob.glob("captions_log_*.txt")
-            print(f"DEBUG: Found {len(caption_logs)} old caption log files to remove")
-            for log_file in caption_logs:
-                try:
-                    os.remove(log_file)
-                    print(f"DEBUG: Removed old caption log: {log_file}")
-                except Exception as e:
-                    print(f"DEBUG: Could not remove {log_file}: {e}")
-            if not caption_logs:
-                print("DEBUG: No old caption log files found")
-        except Exception as e:
-            print(f"DEBUG: Error cleaning up old logs: {e}")
-
-    def _write_word_to_file(self, word: str, translation: str) -> None:
-        """Write translated word to the separate words log file."""
-        # Don't write individual translations to file - only track them for summary
-        # The summary will be written at the end of the session
-        pass
-
-    def _start_capture(self) -> None:
-        self.capture_thread.start()
-        self.status_value.set("Capturing from Live Captions…")
-        print("DEBUG: Started capture thread")
-
-    def _poll_queue(self) -> None:
-        try:
-            while True:
-                sentence = self.queue.get_nowait()
-                print(f"DEBUG: Received sentence from queue: '{sentence}'")
-                if sentence.startswith("__ERROR__:"):
-                    self.status_value.set(sentence.replace("__ERROR__:", "Error: "))
-                    continue
-                
-                # Skip duplicate or near-duplicate sentences recently displayed
-                normalized = normalize_text(sentence)
-                canon = canonicalize_text(sentence)
-                
-                # Check if this sentence is a subset of a recently displayed sentence
-                is_subset = False
-                for recent in self._recent_sentences:
-                    if sentence.lower() in recent.lower() and len(sentence) < len(recent):
-                        print(f"DEBUG: Skipping subset sentence: '{sentence}' (subset of '{recent}')")
-                        is_subset = True
-                        break
-                
-                if is_subset:
-                    continue
-                
-                if normalized in self._recent_sentences:
-                    print(f"DEBUG: Skipping duplicate normalized sentence: '{normalized}'")
-                    continue
-                if canon in self._recent_canon:
-                    print(f"DEBUG: Skipping duplicate canonical sentence: '{canon}'")
-                    continue
-                if self._is_near_duplicate(canon):
-                    print(f"DEBUG: Skipping near-duplicate sentence: '{canon}'")
-                    continue
-                    
-                self._recent_sentences.append(normalized)
-                self._recent_canon.append(canon)
-                if len(self._recent_sentences) > self._recent_limit:
-                    self._recent_sentences.pop(0)
-                if len(self._recent_canon) > self._recent_limit:
-                    self._recent_canon.pop(0)
-                
-                try:
-                    print(f"DEBUG: Adding sentence row: '{sentence}'")
-                    self._add_sentence_row(sentence)
-                except Exception as e:
-                    print(f"Error adding sentence row: {e}")
-                    # Continue processing other sentences
-        except queue.Empty:
-            pass
-        except Exception as e:
-            print(f"Error in poll_queue: {e}")
-            # Continue polling even if there's an error
-        finally:
-            self.root.after(150, self._poll_queue)
-
-    def _add_sentence_row(self, sentence: str) -> None:
-        # Clean the sentence before processing
-        cleaned_sentence = self._clean_sentence_for_translation(sentence)
-        
-        # Log the caption
-        timestamp = time.strftime('%H:%M:%S')
-        self.log_handle.write(f"[{timestamp}] CAPTION: {cleaned_sentence}\n")
-        self.log_handle.flush()
-        
-        # Split into segments based on personal pronoun boundaries
-        segments = self._split_at_pronoun_boundaries(cleaned_sentence)
-        
-        # Process each segment
-        for segment in segments:
-            if self._should_translate_segment(segment):
-                # Add words from this complete segment to the buffer
-                segment_words = self._tokenize_words(segment)
-                self._word_buffer.extend(segment_words)
-                
-                # Log the complete segment
-                self.log_handle.write(f"[{timestamp}] SEGMENT: {segment}\n")
-                self.log_handle.flush()
-        
-        # Maintain sliding window of MAX_WORDS_DISPLAY words
-        if len(self._word_buffer) > MAX_WORDS_DISPLAY:
-            # Remove excess words from the beginning
-            excess = len(self._word_buffer) - MAX_WORDS_DISPLAY
-            self._word_buffer = self._word_buffer[excess:]
-            print(f"DEBUG: Removed {excess} words from beginning, buffer now has {len(self._word_buffer)} words")
-        
-        # Update or create the display row
-        self._update_display_row()
-
-    def _update_display_row(self) -> None:
-        """Update the display row with the current word buffer."""
-        # Remove existing display row if it exists
-        if self._current_display_row:
-            try:
-                self._current_display_row.destroy()
-            except Exception as e:
-                print(f"DEBUG: Error destroying display row: {e}")
-        
-        if not self._word_buffer:
-            return
-            
-        # Create new display row
-        row = ttk.Frame(self.captions_frame.inner)
-        row.pack(fill="x", pady=3)
-
-        # Word buttons with wrapping - this IS the caption display
-        words_frame = tk.Frame(row)
-        words_frame.pack(fill="x", pady=0)
-
-        # Create a wrapping layout for words
-        self._pack_words_with_wrapping(words_frame, self._word_buffer, " ".join(self._word_buffer))
-
-        # Store reference to this row
-        self._current_display_row = row
-
-        # Auto-scroll to the bottom if enabled
-        if self._auto_scroll_enabled:
-            self._scroll_to_bottom()
+    def _on_toggle_caption_clicked(self) -> None:
+        """Handle the toggle button click - show/hide Live Captions and word detection."""
+        if not self.cv_initialized:
+            # Initialize the computer vision system
+            self._initialize_cv_system()
         else:
-            # Check if user is back at bottom and resume auto-scroll
-            self._check_scroll_position()
+            # Toggle the system on/off
+            self._toggle_cv_system()
 
-    def _on_user_scroll(self, event) -> None:
-        """Handle user scroll events to manage auto-scroll state."""
+    def _initialize_cv_system(self) -> None:
+        """Initialize the computer vision system and Live Captions window."""
+        self.status_value.set("Initializing Live Captions...")
+        self.show_caption_button.config(state="disabled", text="Starting...", bg="orange")
+        self.root.update()
+        
         try:
-            # Get current scroll position
-            canvas = self.captions_frame.canvas
-            y_top, y_bot = canvas.yview()
-            current_position = y_bot
+            # Ensure Live Captions window is visible
+            send_hotkey_open_live_captions()
+            time.sleep(3)
             
-            # Check if user scrolled up from the bottom
-            if current_position < 0.95:  # Not at bottom (with small tolerance)
-                if not self._user_scrolled:
-                    print("DEBUG: User scrolled up, pausing auto-scroll")
-                    self._user_scrolled = True
-                    self._auto_scroll_enabled = False
-            else:  # User is at or near the bottom
-                if self._user_scrolled:
-                    print("DEBUG: User scrolled back to bottom, resuming auto-scroll")
-                    self._user_scrolled = False
-                    self._auto_scroll_enabled = True
+            # Find the Live Captions window
+            self.live_captions_window = find_live_captions_window()
+            if not self.live_captions_window:
+                raise RuntimeError("Live Captions window not found. Please enable Live Captions first.")
             
-            self._last_scroll_position = current_position
+            # Create window manager
+            self.window_manager = WindowManager(self.live_captions_window)
+            
+            # Position Live Captions window below translation window
+            self._position_live_captions_window()
+            
+            # Create word detector
+            self.word_detector = WordDetector(self.live_captions_window, self.window_manager)
+            self.word_detector.on_word_selected = self._on_word_selected
+            
+            # Create overlay window
+            self.word_detector.create_overlay_window()
+            
+            # Start window position monitoring
+            self._start_window_position_monitoring()
+            
+            # Update state BEFORE starting thread
+            self.cv_initialized = True
+            self.running = True
+            self.positioning_enabled = True
+            self.word_detector.is_active = True
+            
+            # Start computer vision thread
+            print("Starting computer vision thread...")
+            self.cv_thread = threading.Thread(target=self._computer_vision_loop, daemon=True)
+            self.cv_thread.start()
+            print("Computer vision thread started")
+            
+            # Update UI
+            self.status_value.set("Live Captions active - Click on words to translate")
+            self.word_translation_var.set("Click on words in the Live Captions window to see translations")
+            self.show_caption_button.config(
+                state="normal", 
+                text="Hide", 
+                bg="lightcoral",
+                fg="darkred"
+            )
+            
         except Exception as e:
-            print(f"DEBUG: Error in scroll detection: {e}")
+            self.status_value.set(f"Error: {e}")
+            self.show_caption_button.config(
+                state="normal", 
+                text="Show",
+                bg="lightblue",
+                fg="darkblue"
+            )
+            print(f"Error initializing Live Captions: {e}")
 
-    def _check_scroll_position(self) -> None:
-        """Check if user is at bottom and resume auto-scroll if so."""
-        try:
-            canvas = self.captions_frame.canvas
-            y_top, y_bot = canvas.yview()
-            current_position = y_bot
+    def _toggle_cv_system(self) -> None:
+        """Toggle the computer vision system on/off."""
+        if self.word_detector and self.word_detector.is_active:
+            # Turn off
+            self.word_detector.is_active = False
+            self.running = False
+            self.positioning_enabled = False
             
-            # If user is at bottom, resume auto-scroll
-            if current_position >= 0.95:  # At or near bottom
-                if self._user_scrolled:
-                    print("DEBUG: User at bottom, resuming auto-scroll")
-                    self._user_scrolled = False
-                    self._auto_scroll_enabled = True
-                    self._scroll_to_bottom()
-        except Exception as e:
-            print(f"DEBUG: Error checking scroll position: {e}")
-
-    def _tokenize_words(self, sentence: str) -> List[str]:
-        # Keep apostrophes within words (e.g., don't, I'm). Remove surrounding punctuation.
-        tokens = re.findall(r"[A-Za-z0-9']+", sentence)
-        return [t for t in tokens if t.strip()]
-
-    def _split_at_pronoun_boundaries(self, text: str) -> List[str]:
-        """Split text at personal pronoun boundaries to create complete thought segments."""
-        # Personal pronouns that mark natural sentence boundaries
-        pronouns = ['we', 'they', 'i', 'he', 'she', 'it']
-        
-        # Split text into words
-        words = self._tokenize_words(text)
-        if not words:
-            return []
-        
-        segments = []
-        current_segment = []
-        
-        for word in words:
-            current_segment.append(word)
+            # Destroy overlay window
+            if self.word_detector:
+                self.word_detector.destroy()
             
-            # Check if this word is a personal pronoun (case insensitive)
-            if word.lower() in pronouns:
-                # Complete the current segment
-                if current_segment:
-                    segments.append(' '.join(current_segment))
-                    current_segment = []
-        
-        # Add any remaining words as the final segment
-        if current_segment:
-            segments.append(' '.join(current_segment))
-        
-        return segments
-
-    def _should_translate_segment(self, segment: str) -> bool:
-        """Determine if a segment should be translated based on its completeness."""
-        if not segment or len(segment.strip()) < 3:  # Too short
-            return False
-        
-        # Check if segment ends with a personal pronoun
-        words = self._tokenize_words(segment)
-        if not words:
-            return False
+            # Hide Live Captions window
+            if self.window_manager:
+                current_x, current_y = self.window_manager.get_window_position()
+                self.window_manager.move_window(current_x, -2000)
             
-        pronouns = ['we', 'they', 'i', 'he', 'she', 'it']
-        last_word = words[-1].lower()
-        
-        # Translate if it ends with a pronoun or is a complete thought
-        return last_word in pronouns or len(words) >= 5
+            # Update UI
+            self.status_value.set("Live Captions hidden - Click 'Show' to start")
+            self.word_translation_var.set("Click 'Show' to start word tracking")
+            self.show_caption_button.config(
+                text="Show",
+                bg="lightblue",
+                fg="darkblue"
+            )
+        else:
+            # Turn on
+            self.running = True
+            self.positioning_enabled = True
+            
+            # Show Live Captions window FIRST
+            if self.window_manager:
+                self._position_live_captions_window()
+            
+            # Then recreate overlay window at correct position
+            if self.word_detector:
+                self.word_detector.is_active = True
+                # Recreate overlay window after positioning
+                self.word_detector.create_overlay_window()
+            
+            # Check if computer vision thread is still alive, restart if needed
+            if not hasattr(self, 'cv_thread') or not self.cv_thread.is_alive():
+                print("Restarting computer vision thread...")
+                self.cv_thread = threading.Thread(target=self._computer_vision_loop, daemon=True)
+                self.cv_thread.start()
+                print("Computer vision thread restarted")
+            
+            # Update UI
+            self.status_value.set("Live Captions active - Click on words to translate")
+            self.word_translation_var.set("Click on words in the Live Captions window to see translations")
+            self.show_caption_button.config(
+                text="Hide",
+                bg="lightcoral",
+                fg="darkred"
+            )
 
-    def _pack_words_with_wrapping(self, parent_frame: tk.Frame, words: List[str], sentence: str) -> None:
-        """Pack words with automatic wrapping to fit within the window width."""
-        if not words:
+
+    def _computer_vision_loop(self) -> None:
+        """Main computer vision loop for word detection."""
+        print("CV Loop - Starting computer vision loop")
+        while self.running:
+            print(f"CV Loop - Running: {self.running}, Active: {self.word_detector.is_active if self.word_detector else 'No detector'}")
+            try:
+                if not self.live_captions_window or not self.word_detector or not self.window_manager:
+                    print("CV Loop - Missing components, waiting...")
+                    time.sleep(1)
+                    continue
+                
+                # Only run if word detection is active
+                if not self.word_detector.is_active:
+                    print("CV Loop - Word detection not active, waiting...")
+                    time.sleep(0.5)
+                    continue
+                
+                # Get current Live Captions window position and size
+                current_x, current_y = self.window_manager.get_window_position()
+                current_width, current_height = self.window_manager.get_window_size()
+                
+                print(f"CV Loop - Capturing at: ({current_x}, {current_y}) size: {current_width}x{current_height}")
+                
+                # Update overlay window position to match Live Captions window
+                self.word_detector.update_window_position()
+                
+                # Capture screenshot of Live Captions window using current coordinates
+                screenshot = pyautogui.screenshot(region=(
+                    current_x,
+                    current_y,
+                    current_width,
+                    current_height
+                ))
+                
+                # Convert PIL to OpenCV format
+                screenshot_cv = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                
+                # Detect words
+                print("CV Loop - Calling detect_words...")
+                word_boxes = self.word_detector.detect_words(screenshot_cv)
+                print(f"CV Loop - Detected {len(word_boxes)} words")
+                
+                if word_boxes:
+                    # Draw bounding boxes (with error handling)
+                    try:
+                        self.word_detector.draw_bounding_boxes()
+                        print("CV Loop - Bounding boxes drawn")
+                    except Exception as e:
+                        print(f"CV Loop - Error drawing bounding boxes: {e}")
+                        # Skip this iteration if drawing fails
+                        continue
+                    for i, word in enumerate(word_boxes[:3]):  # Show first 3 words
+                        print(f"  Word {i+1}: '{word['text']}' at {word['bbox']}")
+                else:
+                    print("CV Loop - No words detected, trying OCR on full image...")
+                    # Try to get any text from the image
+                    try:
+                        import pytesseract
+                        text = pytesseract.image_to_string(screenshot_cv, lang="eng").strip()
+                        if text:
+                            print(f"CV Loop - OCR found text: '{text[:100]}...'")
+                        else:
+                            print("CV Loop - OCR found no text")
+                    except Exception as e:
+                        print(f"CV Loop - OCR error: {e}")
+                
+                time.sleep(0.5)  # Update every 500ms
+                
+            except Exception as e:
+                print(f"Error in computer vision loop: {e}")
+                time.sleep(1)
+        
+    def _on_word_selected(self, word: str) -> None:
+        """Handle word selection and trigger translation."""
+        print(f"Word selected for translation: '{word}'")
+        if not word:
             return
             
-        # Get the available width from the main window
-        try:
-            # Get the width of the captions frame (which is the scrollable area)
-            main_width = self.captions_frame.winfo_width()
-            if main_width <= 0:
-                main_width = self.root.winfo_width()
-            available_width = main_width - 40  # 40px padding for scrollbar and margins
-            if available_width <= 0:
-                available_width = 600  # Default width if not available
-        except:
-            available_width = 600  # Default width
+        # Update UI
+        self.word_translation_var.set(f"{word} → translating...")
+        print(f"UI updated with: {word} → translating...")
         
-        # Font for measuring
-        font = ("Segoe UI", 15, "normal")
-        
-        current_line = tk.Frame(parent_frame)
-        current_line.pack(fill="x", pady=1)
-        current_width = 0
-        
-        for word in words:
-            # Create a temporary button to measure its width
-            temp_btn = tk.Button(
-                current_line,
-                text=word,
-                font=font,
-                padx=2,
-                pady=2
-            )
-            temp_btn.update_idletasks()
-            word_width = temp_btn.winfo_reqwidth()
-            temp_btn.destroy()
-            
-            # If adding this word would exceed the width, start a new line
-            if current_width + word_width > available_width and current_width > 0:
-                current_line = tk.Frame(parent_frame)
-                current_line.pack(fill="x", pady=1)
-                current_width = 0
-            
-            # Create the actual button
-            btn = tk.Button(
-                current_line,
-                text=word,
-                command=lambda w=word, s=sentence: self._on_word_clicked(w, s),
-                bd=0,
-                highlightthickness=0,
-                padx=2,
-                pady=2,
-                relief="flat",
-                bg="lightgray",
-                fg="black",
-                font=font
-            )
-            btn.pack(side="left", padx=0, pady=0)
-            current_width += word_width
-
-    def _clean_sentence_for_translation(self, sentence: str) -> str:
-        """Clean sentence by removing repeated blocks and normalizing for translation."""
-        # First, normalize the text
-        normalized = normalize_text(sentence)
-        
-        # Split into words and apply the same cleaning logic as display
-        words = self._tokenize_words(normalized)
-        words = self._collapse_repeated_blocks(words)
-        words = self._collapse_consecutive_duplicates(words)
-        
-        # Join back into a clean sentence
-        cleaned = " ".join(words)
-        
-        # Additional cleanup: remove very long repeated phrases
-        # Look for patterns like "word word word word" and reduce to "word word"
-        cleaned = re.sub(r'\b(\w+(?:\s+\w+){1,3})\s+\1\b', r'\1', cleaned)
-        
-        return cleaned
-
-    def _on_word_clicked(self, word: str, sentence: str) -> None:
-        # Clean the sentence to remove repeated blocks before translation
-        cleaned_sentence = self._clean_sentence_for_translation(sentence)
-        
-        # Find the complete segment containing this word
-        segments = self._split_at_pronoun_boundaries(cleaned_sentence)
-        word_segment = None
-        
-        for segment in segments:
-            if word.lower() in segment.lower():
-                word_segment = segment
-                break
-        
-        # If no segment found, use the full sentence
-        if not word_segment:
-            word_segment = cleaned_sentence
-        
-        # Update the main translation display area
-        self.word_translation_var.set(f"{word} → translating…")
-        self.sentence_translation_var.set("Translating segment…")
-
+        # Start translation in background
         word_future = self.translator.translate_async(word)
-        sent_future = self.translator.translate_async(word_segment)
+        print(f"Translation started for: '{word}'")
 
-        def on_done(fut: Future, setter: tk.StringVar, label_prefix: Optional[str] = None) -> None:
+        def on_translation_done(fut: Future) -> None:
             try:
-                result = fut.result(timeout=10)  # Increased timeout for better reliability
+                result = fut.result(timeout=10)
                 if result and result.strip():
-                    text = result.strip()
+                    translation = result.strip()
                 else:
-                    # Try fallback translation
-                    if label_prefix:
-                        # Word translation
-                        text = simple_translate_fallback(word, self.target_language)
-                    else:
-                        # Segment translation with highlighted word
-                        text = translate_sentence_with_highlighted_word(word_segment, word, self.target_language)
+                    # Fallback translation
+                    translation = simple_translate_fallback(word, self.target_language)
+                
+                # Update UI
+                display_text = f"{word} → {translation}"
+                self.root.after(0, lambda: self.word_translation_var.set(display_text))
+                
+                # Log translation
+                timestamp = time.strftime('%H:%M:%S')
+                self.log_handle.write(f"[{timestamp}] WORD: {word} → {translation}\n")
+                self._translated_words[word.lower()] = translation
+                self._word_translations.append((timestamp, word, translation))
+                self.log_handle.flush()
+                 
             except Exception as e:
                 print(f"Translation error: {e}")
-                # Try fallback translation
-                if label_prefix:
-                    # Word translation
-                    text = simple_translate_fallback(word, self.target_language)
-                else:
-                    # Segment translation with highlighted word
-                    text = translate_sentence_with_highlighted_word(word_segment, word, self.target_language)
-            
-            # Log the translation
-            timestamp = time.strftime('%H:%M:%S')
-            if label_prefix:
-                display = f"{label_prefix} {text}"
-                self.log_handle.write(f"[{timestamp}] WORD: {word} → {text}\n")
-                # Track translated words for separate file
-                self._translated_words[word.lower()] = text
-                self._word_translations.append((timestamp, word, text))
-                self._write_word_to_file(word, text)
-            else:
-                display = text
-                self.log_handle.write(f"[{timestamp}] SEGMENT: {word_segment} → {text}\n")
-            self.log_handle.flush()
-            
-            self.root.after(0, lambda: setter.set(display))
-
-        # Attach callbacks in background threads; results marshalled back via after()
-        threading.Thread(target=on_done, args=(word_future, self.word_translation_var, f"{word} →"), daemon=True).start()
-        threading.Thread(target=on_done, args=(sent_future, self.sentence_translation_var, None), daemon=True).start()
-
-    def _is_near_duplicate(self, canon_sentence: str) -> bool:
-        """Return True if canon_sentence is very similar to any recent canonical one (Jaccard >= 0.85)."""
-        current_words = set(canon_sentence.split())
-        if not current_words:
-            return False
-        for prev in self._recent_canon:
-            prev_words = set(prev.split())
-            if not prev_words:
-                continue
-            inter = len(current_words & prev_words)
-            union = len(current_words | prev_words)
-            if union and (inter / union) >= 0.85:
-                return True
-        return False
-
-    def _on_resize(self, _event: tk.Event) -> None:
-        # Compute available width inside captions frame to wrap labels nicely
-        try:
-            # Subtract scrollbar width and padding
-            avail = max(200, self.captions_frame.winfo_width() - 24)
-        except Exception:
-            avail = 700
-        for lbl in self._all_wrap_labels:
-            try:
-                lbl.configure(wraplength=avail)
-            except Exception:
-                pass
+                fallback = simple_translate_fallback(word, self.target_language)
+                display_text = f"{word} → {fallback}"
+                self.root.after(0, lambda: self.word_translation_var.set(display_text))
         
-        # Re-wrap all caption rows when window is resized
-        self._rewrap_all_captions()
+        # Run translation in background thread
+        threading.Thread(target=on_translation_done, args=(word_future,), daemon=True).start()
 
-    def _rewrap_all_captions(self) -> None:
-        """Re-wrap all caption rows when window is resized."""
+    def _position_live_captions_window(self) -> None:
+        """Position the Live Captions window directly below the translation window."""
         try:
-            # This is a placeholder for now - in a full implementation,
-            # we would need to store the original text and re-create the word layouts
-            # For now, the wrapping happens when captions are first created
-            pass
-        except Exception as e:
-            print(f"DEBUG: Error re-wrapping captions: {e}")
-
-    def _scroll_to_bottom(self) -> None:
-        """Scroll to the bottom of the caption window."""
-        try:
-            canvas = self.captions_frame.canvas
+            if not self.window_manager:
+                return
+                
+            # Get translation window position and size
+            translation_x = self.root.winfo_x()
+            translation_y = self.root.winfo_y()
+            translation_width = self.root.winfo_width()
+            translation_height = self.root.winfo_height()
             
-            def do_scroll() -> None:
+            # Calculate position for Live Captions window (directly below)
+            live_captions_x = translation_x
+            live_captions_y = translation_y + translation_height + 10  # 10px gap
+            
+            # Move the Live Captions window
+            if self.window_manager.move_window(live_captions_x, live_captions_y):
+                print(f"Live Captions window positioned at ({live_captions_x}, {live_captions_y})")
+                self.last_translation_window_pos = (translation_x, translation_y, translation_width, translation_height)
+            else:
+                print("Failed to position Live Captions window")
+                
+        except Exception as e:
+            print(f"Error positioning Live Captions window: {e}")
+
+    def _start_window_position_monitoring(self) -> None:
+        """Start monitoring the translation window position for automatic repositioning."""
+        def monitor_position():
+            while self.running and self.positioning_enabled:
                 try:
-                    canvas.yview_moveto(1.0)
-                    # Update scroll position tracking
-                    self._last_scroll_position = 1.0
-                except Exception:
-                    pass
+                    # Get current translation window position
+                    current_x = self.root.winfo_x()
+                    current_y = self.root.winfo_y()
+                    current_width = self.root.winfo_width()
+                    current_height = self.root.winfo_height()
+                    
+                    # Check if position has changed
+                    if self.last_translation_window_pos is None or \
+                       self.last_translation_window_pos != (current_x, current_y, current_width, current_height):
+                        
+                        # Update Live Captions window position
+                        if self.window_manager and self.live_captions_window:
+                            live_captions_x = current_x
+                            live_captions_y = current_y + current_height + 10  # 10px gap
+                            
+                            if self.window_manager.move_window(live_captions_x, live_captions_y):
+                                print(f"Live Captions window repositioned to ({live_captions_x}, {live_captions_y})")
+                                self.last_translation_window_pos = (current_x, current_y, current_width, current_height)
+                                
+                                # Update overlay window position
+                                if self.word_detector:
+                                    self.word_detector.update_window_position()
+                    
+                    time.sleep(0.1)  # Check every 100ms
+                    
+                except Exception as e:
+                    print(f"Error in position monitoring: {e}")
+                    time.sleep(1)
+        
+        # Start monitoring thread
+        threading.Thread(target=monitor_position, daemon=True).start()
 
-            # Ensure layout is updated, then scroll; schedule an extra tick as backup
-            self.root.update_idletasks()
-            self.root.after_idle(do_scroll)
-            self.root.after(60, do_scroll)
-        except Exception:
-            pass
 
-    def _collapse_consecutive_duplicates(self, words: List[str]) -> List[str]:
-        if not words:
-            return words
-        result: List[str] = [words[0]]
-        for w in words[1:]:
-            if w != result[-1]:
-                result.append(w)
-        return result
-
-    def _collapse_repeated_blocks(self, words: List[str]) -> List[str]:
-        n = len(words)
-        if n < 4:
-            return words
-        # Try to find the smallest period k such that words == block * m (m>=2)
-        for k in range(1, n // 2 + 1):
-            if n % k != 0:
-                continue
-            block = words[:k]
-            if block * (n // k) == words:
-                return block
-        return words
 
     def _on_close(self) -> None:
+        """Clean up resources when closing the application."""
         try:
-            self.capture_thread.stop()
+            self.running = False
+            self.positioning_enabled = False
+            self.cv_initialized = False
+        except Exception:
+                pass
+        try:
+            if self.word_detector:
+                self.word_detector.destroy()
         except Exception:
             pass
         try:
@@ -1056,6 +1153,7 @@ class CaptionApp:
         self.root.destroy()
 
     def run(self) -> None:
+        """Start the application main loop."""
         self.root.mainloop()
 
 

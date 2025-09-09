@@ -1,5 +1,14 @@
-pyautogui
-pygetwindow
-pytesseract
-deep-translator
-pillow
+# Core dependencies
+pyautogui>=0.9.54
+pygetwindow>=0.0.9
+pytesseract>=0.3.10
+deep-translator>=1.11.4
+Pillow>=9.0.0
+opencv-python>=4.5.0
+numpy>=1.21.0
+
+# Windows-specific dependencies
+pywin32>=305
+
+# Optional: For better OCR performance
+# tesseract-ocr>=5.0.0  # Install separately from GitHub releases

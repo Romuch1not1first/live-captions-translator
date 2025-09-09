@@ -1,17 +1,17 @@
-# Live Captions Interactive Translator
+# Live Captions Computer Vision Translator
 
-A real-time caption translation application that captures text from Windows Live Captions and provides interactive word-by-word translation with intelligent sentence boundary detection.
+A real-time computer vision-based caption translation application that uses OCR to detect and translate individual words from Windows Live Captions with interactive click-to-translate functionality.
 
 ## Features
 
-- **Real-time Caption Capture**: Automatically captures text from Windows Live Captions
-- **Interactive Translation**: Click any word to see its translation and the complete sentence
-- **Smart Sentence Boundaries**: Uses personal pronouns (we, they, I, he, she, it) to create meaningful translation segments
-- **Sliding Window Display**: Shows only the latest 40 words to prevent window overflow
-- **Intelligent Auto-scroll**: Automatically scrolls to show new content, pauses when user scrolls up
-- **Word Wrapping**: Automatically wraps long sentences to fit within the window
+- **Computer Vision Word Detection**: Uses OCR to detect individual words in the Live Captions window
+- **Interactive Click-to-Translate**: Click on any detected word to see its translation instantly
+- **Real-time Bounding Boxes**: Visual bounding boxes around detected words with hover effects
+- **Live Captions Integration**: Automatically positions and manages the Live Captions window
+- **Hide/Show Functionality**: Toggle Live Captions visibility with a corner button
 - **Translation Caching**: Caches translations to avoid redundant API calls
-- **Comprehensive Logging**: Logs all captions and translations with timestamps
+- **Comprehensive Logging**: Logs all word translations with timestamps
+- **Clean UI**: Minimalist interface with corner toggle button
 
 ## Requirements
 
@@ -38,13 +38,31 @@ A real-time caption translation application that captures text from Windows Live
 
 ## Usage
 
-1. **Start Live Captions**: The application will automatically open Windows Live Captions
-2. **View Captions**: Captured text appears in the main window with clickable words
-3. **Translate Words**: Click any word to see its individual translation and sentence context
-4. **Scroll Control**: 
-   - Auto-scroll follows new content by default
-   - Scroll up to read older captions (auto-scroll pauses)
-   - Scroll back to bottom to resume auto-scroll
+1. **Start the Application**: Run the script to open the translation window
+2. **Show Live Captions**: Click the "Show" button in the top-right corner
+3. **View Detected Words**: Bounding boxes will appear around detected words
+4. **Translate Words**: Click any word to see its translation instantly
+5. **Hide/Show**: Use the corner button to toggle Live Captions visibility
+
+## How It Works
+
+### Computer Vision System
+- Captures screenshots of the Live Captions window
+- Uses Tesseract OCR to detect individual words
+- Draws interactive bounding boxes around detected words
+- Tracks mouse clicks on bounding boxes for translation
+
+### Word Detection
+- Real-time OCR processing of Live Captions content
+- Confidence-based filtering to ensure accurate detection
+- Automatic bounding box positioning and sizing
+- Hover effects for better user experience
+
+### Translation System
+- Primary: Google Translate API via deep-translator
+- Fallback: Local word mapping dictionary
+- Asynchronous translation to prevent UI blocking
+- Translation caching for improved performance
 
 ## Configuration
 
@@ -65,9 +83,12 @@ TEST_MODE = True  # Set to False for production use
 Caption_translater/
 ├── Caption_live_translater.py    # Main application
 ├── requirements.txt              # Python dependencies
-├── README.md                     # This file
-├── captions_log_*.txt           # Caption logs (auto-generated)
-└── translated_words_*.txt       # Translation logs (auto-generated)
+├── setup.py                     # Package setup
+├── README.md                    # This file
+├── LICENSE                      # License file
+├── CHANGELOG.md                 # Version history
+├── CONTRIBUTING.md              # Contribution guidelines
+└── .gitignore                   # Git ignore rules
 ```
 
 ## Logging
@@ -79,26 +100,24 @@ The application creates two types of log files:
 
 ## Technical Details
 
-### Caption Processing
-- Uses OCR to capture text from Live Captions window
-- Implements stability detection to avoid capturing partial text
-- Cleans and normalizes text to remove duplicates and artifacts
+### Computer Vision Pipeline
+1. **Screenshot Capture**: Captures Live Captions window region
+2. **OCR Processing**: Uses Tesseract to extract word-level data
+3. **Word Detection**: Filters words by confidence and creates bounding boxes
+4. **Interactive Overlay**: Creates transparent overlay window for click detection
+5. **Translation**: Translates clicked words using Google Translate API
 
-### Translation System
-- Primary: Google Translate API via deep-translator
-- Fallback: Local word mapping dictionary
-- Caching system to improve performance
+### Window Management
+- Automatic Live Captions window positioning
+- Real-time window position tracking
+- Overlay window synchronization
+- Hide/show functionality with proper cleanup
 
-### Smart Boundaries
-- Splits text at personal pronouns for complete thought segments
-- Ensures translations are meaningful and contextually complete
-- Prevents fragmented or partial translations
-
-### UI Features
-- 40-word sliding window to prevent overflow
-- Automatic word wrapping for long sentences
-- Smart auto-scroll that respects user interaction
+### UI Components
+- Main translation window with corner toggle button
+- Semi-transparent overlay window for word interaction
 - Real-time translation display
+- Status bar with system information
 
 ## Troubleshooting
 
@@ -112,12 +131,17 @@ The application creates two types of log files:
    - Verify Tesseract is installed at the correct path
    - Update `TESSERACT_EXE` path if needed
 
-3. **No captions appearing**
+3. **No words detected**
    - Check if Live Captions is showing text
    - Verify audio is playing and being captioned
-   - Try adjusting `SILENCE_SEC` and `CAPTURE_INTERVAL_SEC`
+   - Try adjusting OCR confidence threshold
 
-4. **Translation not working**
+4. **Click detection not working**
+   - Ensure overlay window is visible
+   - Check if bounding boxes are being drawn
+   - Verify mouse click coordinates
+
+5. **Translation not working**
    - Check internet connection
    - Verify Google Translate API is accessible
    - Check console for error messages
@@ -129,10 +153,15 @@ The application creates two types of log files:
 2. Modify `target_language` parameter
 3. Test with the new language
 
-### Customizing Translation
-- Modify `translate_text()` for different translation services
-- Update `simple_translate_fallback()` for local translations
-- Adjust `_split_at_pronoun_boundaries()` for different boundary rules
+### Customizing Detection
+- Modify OCR confidence threshold in `detect_words()`
+- Adjust bounding box colors and styles
+- Customize word filtering criteria
+
+### UI Customization
+- Modify button appearance and positioning
+- Adjust overlay window transparency
+- Customize translation display format
 
 ## License
 
@@ -144,7 +173,7 @@ Contributions are welcome! Please feel free to submit issues, feature requests, 
 
 ## Version History
 
-- v1.0: Initial release with basic caption capture and translation
-- v1.1: Added smart sentence boundaries and pronoun detection
-- v1.2: Implemented sliding window and auto-scroll features
-- v1.3: Enhanced word wrapping and user interaction handling
+- v2.0: Complete rewrite with computer vision word detection
+- v2.1: Added interactive click-to-translate functionality
+- v2.2: Implemented hide/show toggle and window management
+- v2.3: Enhanced UI with corner button and clean design
