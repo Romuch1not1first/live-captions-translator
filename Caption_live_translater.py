@@ -1023,10 +1023,11 @@ class CaptionApp:
                     time.sleep(0.5)
                     continue
                 
-                # Check if coordinates are within any monitor bounds
-                monitor_info = self._get_monitor_info(current_x, current_y)
-                if not monitor_info:
-                    print(f"CV Loop - Coordinates not on any monitor: x={current_x}, y={current_y}")
+                # Check if coordinates are within screen bounds
+                screen_width = self.root.winfo_screenwidth()
+                screen_height = self.root.winfo_screenheight()
+                if current_x < 0 or current_y < 0 or current_x >= screen_width or current_y >= screen_height:
+                    print(f"CV Loop - Coordinates outside screen bounds: x={current_x}, y={current_y}")
                     time.sleep(0.5)
                     continue
                 
