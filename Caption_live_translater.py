@@ -924,7 +924,7 @@ class CaptionApp:
                 fg="darkred"
             )
             
-            except Exception as e:
+        except Exception as e:
             self.status_value.set(f"Error: {e}")
             self.show_caption_button.config(
                 state="normal", 
@@ -1198,7 +1198,7 @@ class CaptionApp:
                     
                     time.sleep(0.1)  # Check every 100ms
                     
-        except Exception as e:
+                except Exception as e:
                     print(f"Error in position monitoring: {e}")
                     time.sleep(1)
         
