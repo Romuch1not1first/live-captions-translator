@@ -818,7 +818,8 @@ class CaptionApp:
         self._word_translations: List[tuple[str, str, str]] = []
         self._words_log_file = f"translated_words_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         
-        # Current translated word for Reverso
+        # Current words for Reverso
+        self.current_original_word: Optional[str] = None
         self.current_translated_word: Optional[str] = None
         
     def _on_toggle_caption_clicked(self) -> None:
@@ -831,16 +832,16 @@ class CaptionApp:
             self._toggle_cv_system()
     
     def _on_reverso_clicked(self) -> None:
-        """Handle the Reverso button click - open Reverso with the translated word."""
-        if self.current_translated_word:
+        """Handle the Reverso button click - open Reverso with the original English word."""
+        if self.current_original_word:
             # URL encode the word to handle special characters
             import urllib.parse
-            encoded_word = urllib.parse.quote(self.current_translated_word)
+            encoded_word = urllib.parse.quote(self.current_original_word)
             url = f"https://www.reverso.net/text-translation#sl=eng&tl=rus&text={encoded_word}"
             webbrowser.open(url)
-            print(f"Opening Reverso for translated word: {self.current_translated_word}")
+            print(f"Opening Reverso for English word: {self.current_original_word}")
         else:
-            print("No translated word available for Reverso")
+            print("No original word available for Reverso")
 
     def _initialize_cv_system(self) -> None:
         """Initialize the computer vision system and Live Captions window."""
@@ -1058,7 +1059,8 @@ class CaptionApp:
                     # Fallback translation
                     translation = simple_translate_fallback(word, self.target_language)
                 
-                # Store translated word for Reverso
+                # Store both original and translated words for Reverso
+                self.current_original_word = word
                 self.current_translated_word = translation
                 
                 # Update UI
@@ -1083,7 +1085,8 @@ class CaptionApp:
                 display_text = f"{word} → {fallback}"
                 self.root.after(0, lambda: self.word_translation_var.set(display_text))
                 
-                # Store fallback translation for Reverso
+                # Store both original and fallback translation for Reverso
+                self.current_original_word = word
                 self.current_translated_word = fallback
                 self.root.after(0, lambda: self.reverso_button.config(state="normal"))
         
