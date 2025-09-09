@@ -1017,21 +1017,50 @@ class CaptionApp:
                 # Update overlay window position to match Live Captions window
                 self.word_detector.update_window_position()
                 
+                # Ensure coordinates are valid for screenshot capture
+                if current_width <= 0 or current_height <= 0:
+                    print(f"CV Loop - Invalid dimensions: w={current_width}, h={current_height}")
+                    time.sleep(0.5)
+                    continue
+                
+                # Check if coordinates are within any monitor bounds
+                monitor_info = self._get_monitor_info(current_x, current_y)
+                if not monitor_info:
+                    print(f"CV Loop - Coordinates not on any monitor: x={current_x}, y={current_y}")
+                    time.sleep(0.5)
+                    continue
+                
                 # Capture screenshot of Live Captions window using current coordinates
-                screenshot = pyautogui.screenshot(region=(
-                    current_x,
-                    current_y,
-                    current_width,
-                    current_height
-                ))
+                try:
+                    screenshot = pyautogui.screenshot(region=(
+                        current_x,
+                        current_y,
+                        current_width,
+                        current_height
+                    ))
+                    print(f"CV Loop - Screenshot captured successfully")
+                except Exception as e:
+                    print(f"CV Loop - Screenshot capture failed: {e}")
+                    time.sleep(0.5)
+                    continue
                 
                 # Convert PIL to OpenCV format
                 screenshot_cv = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
                 
                 # Detect words
                 print("CV Loop - Calling detect_words...")
+                print(f"CV Loop - Image shape: {screenshot_cv.shape}")
                 word_boxes = self.word_detector.detect_words(screenshot_cv)
                 print(f"CV Loop - Detected {len(word_boxes)} words")
+                
+                # If no words detected, try to save the image for debugging
+                if len(word_boxes) == 0:
+                    try:
+                        debug_filename = f"debug_screenshot_{int(time.time())}.png"
+                        cv2.imwrite(debug_filename, screenshot_cv)
+                        print(f"CV Loop - Saved debug screenshot: {debug_filename}")
+                    except Exception as e:
+                        print(f"CV Loop - Failed to save debug screenshot: {e}")
                 
                 if word_boxes:
                     # Draw bounding boxes (with error handling)
