@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 import win32gui
 import win32con
+import win32process
 
 try:
     # deep-translator is lightweight and reliable
@@ -196,6 +197,42 @@ def cleanup_old_log_files(max_files: int = 5) -> None:
                     
     except Exception as e:
         print(f"Error during log cleanup: {e}")
+
+
+def close_live_captions_window() -> bool:
+    """
+    Close the Live Captions window gracefully.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Find the Live Captions window
+        hwnd = win32gui.FindWindow(None, "Live Captions")
+        
+        if hwnd:
+            # Get the process ID
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            
+            # Close the window gracefully first
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            
+            # Wait a moment for graceful shutdown
+            time.sleep(2)
+            
+            # Force terminate using taskkill if still running
+            try:
+                subprocess.run(['taskkill', '/F', '/PID', str(pid)], check=True)
+                print("LiveCaptions.exe closed successfully!")
+                return True
+            except subprocess.CalledProcessError:
+                print("LiveCaptions.exe was already closed!")
+                return True
+        else:
+            print("Live Captions window not found!")
+            return False
+            
+    except Exception as e:
+        print(f"Error closing Live Captions window: {e}")
+        return False
 
 
 class WindowManager:
@@ -1311,6 +1348,11 @@ class CaptionApp:
             self.translator.shutdown()
         except Exception:
             pass
+        try:
+            # Close Live Captions window if it exists
+            close_live_captions_window()
+        except Exception as e:
+            print(f"Error closing Live Captions window: {e}")
         try:
             # Close log file
             self.log_handle.write(f"\nSession ended at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
