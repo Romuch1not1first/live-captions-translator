@@ -3,6 +3,7 @@ import ctypes
 import time
 import re
 import webbrowser
+import subprocess
 from typing import Generator, Iterable, Optional, List, Tuple, Dict
 import threading
 import queue
@@ -125,6 +126,35 @@ def clean_captured_text(text: str) -> str:
 
 def find_live_captions_window() -> Optional[gw.Win32Window]:
     return next((w for w in gw.getWindowsWithTitle("Live Captions")), None)
+
+
+def launch_live_captions_exe() -> bool:
+    """
+    Launch LiveCaptions.exe and position the window.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Launch LiveCaptions.exe
+        subprocess.Popen(['LiveCaptions.exe'])
+        
+        # Wait for application to load
+        time.sleep(3)
+        
+        # Find the Live Captions window
+        hwnd = win32gui.FindWindow(None, "Live Captions")
+        
+        if hwnd:
+            # Move and resize window to position (100, 100) with size 710x120
+            win32gui.MoveWindow(hwnd, 100, 100, 710, 120, True)
+            print("LiveCaptions.exe launched and window repositioned successfully!")
+            return True
+        else:
+            print("Live Captions window not found!")
+            return False
+            
+    except Exception as e:
+        print(f"Error launching LiveCaptions.exe: {e}")
+        return False
 
 
 class WindowManager:
@@ -733,7 +763,7 @@ class CaptionApp:
         self.target_language = target_language
         self.root = tk.Tk()
         self.root.title("Live Captions — Computer Vision Translator")
-        self.root.geometry("400x200")
+        self.root.geometry("350x170")
         
         # Setup logging
         self.log_file = f"captions_log_{time.strftime('%Y%m%d_%H%M%S')}.txt"
@@ -751,17 +781,12 @@ class CaptionApp:
         self.translation_frame = ttk.Frame(self.root)
         self.translation_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
         
-        # Title
-        title_label = tk.Label(self.translation_frame, text="Live Captions Translator", 
-                              font=("Segoe UI", 16, "bold"), fg="darkblue")
-        title_label.pack(pady=(0, 10))
-        
         # Translation labels
-        self.word_translation_var = tk.StringVar(value="Click 'Show Live Caption' to start word tracking")
+        self.word_translation_var = tk.StringVar(value="Click 'Show' to start word tracking")
         self.word_translation_label = tk.Label(self.translation_frame, textvariable=self.word_translation_var, 
                                              font=("Segoe UI", 14, "bold"), fg="darkgreen", wraplength=350, 
                                              justify="center")
-        self.word_translation_label.pack(pady=(0, 10))
+        self.word_translation_label.pack(pady=(40, 10))
         
         # Show Live Caption button (small, in corner)
         self.show_caption_button = tk.Button(
@@ -840,8 +865,22 @@ class CaptionApp:
     def _on_toggle_caption_clicked(self) -> None:
         """Handle the toggle button click - show/hide Live Captions and word detection."""
         if not self.cv_initialized:
-            # Initialize the computer vision system
-            self._initialize_cv_system()
+            # First try to launch LiveCaptions.exe
+            self.status_value.set("Launching LiveCaptions.exe...")
+            self.show_caption_button.config(state="disabled", text="Launching...", bg="orange")
+            self.root.update()
+            
+            if launch_live_captions_exe():
+                # Wait a bit more for the window to be fully ready
+                time.sleep(2)
+                # Initialize the computer vision system
+                self._initialize_cv_system()
+            else:
+                # Fallback to the original method if LiveCaptions.exe launch fails
+                self.status_value.set("LiveCaptions.exe not found, using Windows Live Captions...")
+                self.root.update()
+                time.sleep(1)
+                self._initialize_cv_system()
         else:
             # Toggle the system on/off
             self._toggle_cv_system()
