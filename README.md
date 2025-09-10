@@ -174,8 +174,7 @@ Contributions are welcome! Please feel free to submit issues, feature requests, 
 ## TODO
 
 - [ ] Add a check on which corner of the translation window is located - when moving the translation window to the second corner and opening live_caption.exe, boxes to press and translate are not visible
-- [ ] Add close Live Caption with translate window - when closing the main translation window, also close the Live Captions window
-- [ ] Make Live Caption two times shorter - reduce the height of the Live Captions window to make it more compact
+- [ ] Add translate by context
 
 ## Version History
 
