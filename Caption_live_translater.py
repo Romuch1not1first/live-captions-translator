@@ -4,6 +4,8 @@ import time
 import re
 import webbrowser
 import subprocess
+import os
+import glob
 from typing import Generator, Iterable, Optional, List, Tuple, Dict
 import threading
 import queue
@@ -155,6 +157,45 @@ def launch_live_captions_exe() -> bool:
     except Exception as e:
         print(f"Error launching LiveCaptions.exe: {e}")
         return False
+
+
+def cleanup_old_log_files(max_files: int = 5) -> None:
+    """
+    Clean up old log files, keeping only the most recent ones.
+    
+    Args:
+        max_files: Maximum number of log files to keep (default: 5)
+    """
+    try:
+        # Get all caption log files
+        caption_logs = glob.glob("captions_log_*.txt")
+        # Get all translated words log files
+        words_logs = glob.glob("translated_words_*.txt")
+        
+        # Sort by modification time (newest first)
+        caption_logs.sort(key=os.path.getmtime, reverse=True)
+        words_logs.sort(key=os.path.getmtime, reverse=True)
+        
+        # Remove excess caption log files
+        if len(caption_logs) > max_files:
+            for old_file in caption_logs[max_files:]:
+                try:
+                    os.remove(old_file)
+                    print(f"Removed old caption log: {old_file}")
+                except Exception as e:
+                    print(f"Error removing {old_file}: {e}")
+        
+        # Remove excess translated words log files
+        if len(words_logs) > max_files:
+            for old_file in words_logs[max_files:]:
+                try:
+                    os.remove(old_file)
+                    print(f"Removed old words log: {old_file}")
+                except Exception as e:
+                    print(f"Error removing {old_file}: {e}")
+                    
+    except Exception as e:
+        print(f"Error during log cleanup: {e}")
 
 
 class WindowManager:
@@ -452,6 +493,9 @@ def run_realtime_caption_translation(target_language: str = "ru", log_to_file: O
     Start the capture loop and print English + translated text in real time.
     Optionally, append the pairs to a log file.
     """
+    # Clean up old log files before starting
+    cleanup_old_log_files()
+    
     log_file_handle = None
     if log_to_file:
         log_file_handle = open(log_to_file, "a", encoding="utf-8")
@@ -766,6 +810,9 @@ class CaptionApp:
         self.root.geometry("350x170")
         
         # Setup logging
+        # Clean up old log files before creating new ones
+        cleanup_old_log_files()
+        
         self.log_file = f"captions_log_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         self.log_handle = open(self.log_file, "w", encoding="utf-8")
         self.log_handle.write(f"Live Captions Translation Log - Started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
