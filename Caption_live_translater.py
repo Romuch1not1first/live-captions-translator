@@ -54,7 +54,7 @@ PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
 
 # Gemini API Configuration
 GEMINI_API_KEY = ""  # Will be loaded from secure storage
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 # Point pytesseract to local tesseract (if installed in default path)
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_EXE
@@ -1296,8 +1296,17 @@ class CaptionApp:
         gemini_radio.pack(side="left")
         
         # Perplexity API Key section
-        perplexity_label = ttk.Label(self.settings_frame, text="Perplexity API Key:")
-        perplexity_label.pack(anchor="w", pady=(0, 5))
+        perplexity_frame = ttk.Frame(self.settings_frame)
+        perplexity_frame.pack(fill="x", pady=(0, 5))
+        
+        perplexity_label = ttk.Label(perplexity_frame, text="Perplexity API Key:")
+        perplexity_label.pack(side="left", anchor="w")
+        
+        perplexity_link = ttk.Label(perplexity_frame, text="Get API Key", 
+                                  font=("Segoe UI", 8, "underline"),
+                                  foreground="blue", cursor="hand2")
+        perplexity_link.pack(side="right", anchor="e")
+        perplexity_link.bind("<Button-1>", lambda e: webbrowser.open("https://www.perplexity.ai/account/api"))
         
         self.perplexity_api_var = tk.StringVar(value=self.perplexity_api_key)
         self.perplexity_api_entry = ttk.Entry(self.settings_frame, textvariable=self.perplexity_api_var, 
@@ -1305,8 +1314,17 @@ class CaptionApp:
         self.perplexity_api_entry.pack(fill="x", pady=(0, 5))
         
         # Gemini API Key section
-        gemini_label = ttk.Label(self.settings_frame, text="Gemini API Key:")
-        gemini_label.pack(anchor="w", pady=(0, 5))
+        gemini_frame = ttk.Frame(self.settings_frame)
+        gemini_frame.pack(fill="x", pady=(0, 5))
+        
+        gemini_label = ttk.Label(gemini_frame, text="Gemini API Key:")
+        gemini_label.pack(side="left", anchor="w")
+        
+        gemini_link = ttk.Label(gemini_frame, text="Get API Key", 
+                               font=("Segoe UI", 8, "underline"),
+                               foreground="blue", cursor="hand2")
+        gemini_link.pack(side="right", anchor="e")
+        gemini_link.bind("<Button-1>", lambda e: webbrowser.open("https://aistudio.google.com/apikey"))
         
         self.gemini_api_var = tk.StringVar(value=self.gemini_api_key)
         self.gemini_api_entry = ttk.Entry(self.settings_frame, textvariable=self.gemini_api_var, 
@@ -1315,7 +1333,7 @@ class CaptionApp:
         
         # Help text
         help_text = ttk.Label(self.settings_frame, 
-                             text="Perplexity: https://www.perplexity.ai/settings/api\nGemini: https://makersuite.google.com/app/apikey",
+                             text="Click 'Get API Key' links above to obtain your API keys",
                              font=("Segoe UI", 8),
                              foreground="gray")
         help_text.pack(anchor="w", pady=(0, 10))
