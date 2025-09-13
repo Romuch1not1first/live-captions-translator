@@ -11,9 +11,7 @@ import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor, Future
 import tkinter as tk
-from tkinter import ttk
-import math
-
+from tkinter import ttk, messagebox
 import pyautogui
 import pygetwindow as gw
 import pytesseract
@@ -23,8 +21,17 @@ import win32gui
 import win32con
 import win32process
 
+import requests
+
+# Security imports for API key protection
+import base64
+import hashlib
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
 try:
-    # deep-translator is lightweight and reliable
+    # deep-translator as fallback when Perplexity API is not available
     from deep_translator import GoogleTranslator
 except Exception as _import_error:  # pragma: no cover
     GoogleTranslator = None  # type: ignore
@@ -41,8 +48,93 @@ IGNORE_SUBSTRINGS: List[str] = [
 ]
 TEST_MODE = True  # Set to True for immediate capture without stability checks
 
+# Perplexity API Configuration
+PERPLEXITY_API_KEY = ""  # Will be loaded from secure storage
+PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
+
+# Gemini API Configuration
+GEMINI_API_KEY = ""  # Will be loaded from secure storage
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+
 # Point pytesseract to local tesseract (if installed in default path)
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_EXE
+
+
+class SecureStorage:
+    """Secure storage for API keys and sensitive data using encryption."""
+    
+    def __init__(self):
+        self.salt = b'caption_translator_salt_2024'  # Fixed salt for consistency
+        self.master_password = self._get_master_password()
+        self.cipher_suite = self._create_cipher()
+    
+    def _get_master_password(self) -> bytes:
+        """Generate a master password based on system characteristics."""
+        # Use system-specific data to create a unique password
+        import platform
+        import getpass
+        
+        system_info = f"{platform.node()}{platform.system()}{getpass.getuser()}"
+        return hashlib.sha256(system_info.encode()).digest()
+    
+    def _create_cipher(self) -> Fernet:
+        """Create encryption cipher using PBKDF2."""
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=self.salt,
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(self.master_password))
+        return Fernet(key)
+    
+    def encrypt_data(self, data: str) -> str:
+        """Encrypt sensitive data."""
+        try:
+            encrypted_data = self.cipher_suite.encrypt(data.encode())
+            return base64.urlsafe_b64encode(encrypted_data).decode()
+        except Exception as e:
+            print(f"Encryption error: {e}")
+            return ""
+    
+    def decrypt_data(self, encrypted_data: str) -> str:
+        """Decrypt sensitive data."""
+        try:
+            if not encrypted_data:
+                return ""
+            decoded_data = base64.urlsafe_b64decode(encrypted_data.encode())
+            decrypted_data = self.cipher_suite.decrypt(decoded_data)
+            return decrypted_data.decode()
+        except Exception as e:
+            print(f"Decryption error: {e}")
+            return ""
+    
+    def save_secure_file(self, filename: str, data: str) -> bool:
+        """Save encrypted data to file."""
+        try:
+            encrypted_data = self.encrypt_data(data)
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(encrypted_data)
+            return True
+        except Exception as e:
+            print(f"Error saving secure file {filename}: {e}")
+            return False
+    
+    def load_secure_file(self, filename: str) -> str:
+        """Load and decrypt data from file."""
+        try:
+            if not os.path.exists(filename):
+                return ""
+            with open(filename, 'r', encoding='utf-8') as f:
+                encrypted_data = f.read().strip()
+            return self.decrypt_data(encrypted_data)
+        except Exception as e:
+            print(f"Error loading secure file {filename}: {e}")
+            return ""
+
+
+# Global secure storage instance
+secure_storage = SecureStorage()
 
 
 # --- Utilities reused from the existing app ---
@@ -410,29 +502,213 @@ def capture_live_captions(
         time.sleep(capture_interval_seconds)
 
 
-def translate_text(text: str, target_language: str = "ru") -> Optional[str]:
+def translate_text(text: str, target_language: str = "ru", sentence: str = "", selected_api: str = "perplexity", api_key: str = None) -> Optional[str]:
     """
-    Translate text to the target language using deep-translator's GoogleTranslator.
-    Returns None if translation fails (e.g., no internet or API block).
+    Translate text to the target language using the selected API with sentence context.
+    Falls back to other APIs if the primary one fails.
+    Returns None if all methods fail.
+    
+    Args:
+        text: Text to translate
+        target_language: Target language code (default: "ru")
+        sentence: Full sentence context for better translation
+        selected_api: Primary API to use ("perplexity", "gemini", "deep_translator")
+        api_key: API key for the selected service
     """
     if not text:
         return ""
+    
+    # Try the selected API first
+    if selected_api == "perplexity":
+        perplexity_result = _translate_with_perplexity(text, target_language, sentence, api_key)
+        if perplexity_result:
+            return perplexity_result
+        
+        # Fallback to Gemini if Perplexity fails
+        print(f"Perplexity API failed for '{text}', trying Gemini fallback...")
+        gemini_result = _translate_with_gemini(text, target_language, sentence, api_key)
+        if gemini_result:
+            return gemini_result
+            
+    elif selected_api == "gemini":
+        gemini_result = _translate_with_gemini(text, target_language, sentence, api_key)
+        if gemini_result:
+            return gemini_result
+        
+        # Fallback to Perplexity if Gemini fails
+        print(f"Gemini API failed for '{text}', trying Perplexity fallback...")
+        perplexity_result = _translate_with_perplexity(text, target_language, sentence, api_key)
+        if perplexity_result:
+            return perplexity_result
+    
+    # Final fallback to deep-translator
+    print(f"Both API methods failed for '{text}', trying deep-translator fallback...")
+    deep_translator_result = _translate_with_deep_translator(text, target_language)
+    if deep_translator_result:
+        return deep_translator_result
+    
+    print(f"All translation methods failed for '{text}'")
+    return None
+
+
+def _translate_with_perplexity(text: str, target_language: str = "ru", sentence: str = "", api_key: str = None) -> Optional[str]:
+    """Translate using Perplexity API with sentence context."""
+    try:
+        # Use provided API key or fall back to global one
+        key_to_use = api_key if api_key else PERPLEXITY_API_KEY
+        
+        # Prepare the translation request
+        headers = {
+            "Authorization": f"Bearer {key_to_use}",
+            "Content-Type": "application/json"
+        }
+        
+        # Create a context-aware translation prompt
+        if target_language == "ru":
+            target_lang_name = "Russian"
+        else:
+            target_lang_name = target_language.title()
+        
+        # Create context-aware prompt
+        if sentence and sentence.strip() and sentence != text:
+            prompt = f"""Translate the word "{text}" from English to {target_lang_name}. 
+            The word appears in this sentence: "{sentence}"
+            Provide only the translation of the word "{text}" without any additional explanations or formatting.
+            Consider the context of the sentence to give the most appropriate translation."""
+        else:
+            prompt = f"""Translate the following English text to {target_lang_name}. 
+            Provide only the translation without any additional explanations or formatting.
+            Text to translate: {text}"""
+        
+        data = {
+            "model": "sonar-pro",
+            "messages": [
+                {"role": "system", "content": f"You are a professional translator. Translate English text to {target_lang_name} accurately and naturally, considering context when provided."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 150,
+            "temperature": 0.1
+        }
+        
+        response = requests.post(PERPLEXITY_API_URL, headers=headers, json=data, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()["choices"][0]["message"]["content"].strip()
+            if result and result.strip():
+                print(f"Perplexity translation successful: '{text}' -> '{result}' (context: '{sentence}')")
+                return result.strip()
+            else:
+                print(f"Perplexity API returned empty result for: '{text}'")
+                return None
+        else:
+            print(f"Perplexity API error: {response.status_code}, {response.text}")
+            return None
+            
+    except requests.exceptions.Timeout:
+        print(f"Perplexity API timeout for '{text}'")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Perplexity API network error for '{text}': {e}")
+        return None
+    except Exception as e:
+        print(f"Perplexity API failed for '{text}': {e}")
+        return None
+
+
+def _translate_with_gemini(text: str, target_language: str = "ru", sentence: str = "", api_key: str = None) -> Optional[str]:
+    """Translate using Gemini API with sentence context."""
+    try:
+        # Use provided API key or fall back to global one
+        key_to_use = api_key if api_key else GEMINI_API_KEY
+        
+        if not key_to_use or not key_to_use.strip():
+            print("Gemini API key not provided")
+            return None
+        
+        # Prepare the translation request
+        url = f"{GEMINI_API_URL}?key={key_to_use}"
+        
+        # Create a context-aware translation prompt
+        if target_language == "ru":
+            target_lang_name = "Russian"
+        else:
+            target_lang_name = target_language.title()
+        
+        # Create context-aware prompt
+        if sentence and sentence.strip() and sentence != text:
+            prompt = f"""Translate the word "{text}" from English to {target_lang_name}. 
+            The word appears in this sentence: "{sentence}"
+            Provide only the translation of the word "{text}" without any additional explanations or formatting.
+            Consider the context of the sentence to give the most appropriate translation."""
+        else:
+            prompt = f"""Translate the following English text to {target_lang_name}. 
+            Provide only the translation without any additional explanations or formatting.
+            Text to translate: {text}"""
+        
+        data = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": f"You are a professional translator. Translate English text to {target_lang_name} accurately and naturally, considering context when provided.\n\n{prompt}"
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 150
+            }
+        }
+        
+        response = requests.post(url, json=data, timeout=10)
+        
+        if response.status_code == 200:
+            result_data = response.json()
+            if "candidates" in result_data and len(result_data["candidates"]) > 0:
+                result = result_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                if result and result.strip():
+                    print(f"Gemini translation successful: '{text}' -> '{result}' (context: '{sentence}')")
+                    return result.strip()
+                else:
+                    print(f"Gemini API returned empty result for: '{text}'")
+                    return None
+            else:
+                print(f"Gemini API returned no candidates for: '{text}'")
+                return None
+        else:
+            print(f"Gemini API error: {response.status_code}, {response.text}")
+            return None
+            
+    except requests.exceptions.Timeout:
+        print(f"Gemini API timeout for '{text}'")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Gemini API network error for '{text}': {e}")
+        return None
+    except Exception as e:
+        print(f"Gemini API failed for '{text}': {e}")
+        return None
+
+
+def _translate_with_deep_translator(text: str, target_language: str = "ru") -> Optional[str]:
+    """Translate using deep-translator as fallback."""
     if GoogleTranslator is None:
         print("GoogleTranslator not available")
         return None
+    
     try:
         # Using auto source detection is robust for English input
         translator = GoogleTranslator(source="auto", target=target_language)
         result = translator.translate(text)
         if result and result.strip():
-            print(f"Translation successful: '{text}' -> '{result}'")
+            print(f"Deep-translator translation successful: '{text}' -> '{result}'")
             return result.strip()
         else:
-            print(f"Translation returned empty result for: '{text}'")
+            print(f"Deep-translator returned empty result for: '{text}'")
             return None
     except Exception as e:
-        print(f"Translation failed for '{text}': {e}")
-        # Network errors or service unavailability
+        print(f"Deep-translator failed for '{text}': {e}")
         return None
 
 
@@ -598,6 +874,7 @@ class WordDetector:
         self.overlay_window: Optional[tk.Toplevel] = None
         self.canvas: Optional[tk.Canvas] = None
         self.is_active = False
+        self.current_sentence: str = ""  # Store current sentence for context
         
     def detect_words(self, screenshot: np.ndarray) -> List[Dict]:
         """Detect words in the Live Captions window and return bounding boxes."""
@@ -615,6 +892,21 @@ class WordDetector:
             word_boxes = []
             n_boxes = len(data['text'])
             
+            # Extract full sentence from all detected text
+            full_sentence_words = []
+            for i in range(n_boxes):
+                text = data['text'][i].strip()
+                conf = int(data['conf'][i])
+                
+                # Collect all words for full sentence (lower confidence threshold for sentence)
+                if conf > 20 and text and len(text) > 0:
+                    full_sentence_words.append(text)
+            
+            # Create full sentence
+            full_sentence = " ".join(full_sentence_words).strip()
+            print(f"WordDetector - Full sentence: '{full_sentence}'")
+            
+            # Process individual words with higher confidence
             for i in range(n_boxes):
                 text = data['text'][i].strip()
                 conf = int(data['conf'][i])
@@ -630,10 +922,12 @@ class WordDetector:
                         'text': text,
                         'bbox': (x, y, w, h),
                         'confidence': conf,
-                        'selected': False
+                        'selected': False,
+                        'sentence': full_sentence  # Include full sentence context
                     })
             
             self.word_boxes = word_boxes
+            self.current_sentence = full_sentence  # Store current sentence
             return word_boxes
             
         except Exception as e:
@@ -744,10 +1038,11 @@ class WordDetector:
                 # Redraw bounding boxes
                 self.draw_bounding_boxes()
                 
-                # Trigger translation
+                # Trigger translation with sentence context
                 if hasattr(self, 'on_word_selected'):
-                    print(f"Calling on_word_selected for '{word_data['text']}'")
-                    self.on_word_selected(word_data['text'])
+                    sentence = word_data.get('sentence', self.current_sentence)
+                    print(f"Calling on_word_selected for '{word_data['text']}' with sentence: '{sentence}'")
+                    self.on_word_selected(word_data['text'], sentence)
                 
                 break
     
@@ -804,31 +1099,36 @@ class WordDetector:
 
 
 class TranslatorService:
-    """Thread-pooled translation service using deep-translator when available."""
+    """Thread-pooled translation service with multiple API support."""
 
-    def __init__(self, target_language: str = "ru", max_workers: int = 2) -> None:
+    def __init__(self, target_language: str = "ru", max_workers: int = 2, api_key: str = None, selected_api: str = "perplexity") -> None:
         self.target_language = target_language
+        self.api_key = api_key
+        self.selected_api = selected_api
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="translator")
         self._translation_cache: dict[str, str] = {}
 
-    def translate_async(self, text: str) -> Future:
-        return self._pool.submit(self._translate, text)
+    def translate_async(self, text: str, sentence: str = "") -> Future:
+        return self._pool.submit(self._translate, text, sentence)
 
-    def _translate(self, text: str) -> Optional[str]:
-        """Translate text using Google Translate with fallback and caching."""
-        # Check cache first
-        if text in self._translation_cache:
-            return self._translation_cache[text]
+    def _translate(self, text: str, sentence: str = "") -> Optional[str]:
+        """Translate text using selected API with sentence context, fallback and caching."""
+        # Create cache key that includes context for better accuracy
+        cache_key = f"{text}|{sentence}" if sentence else text
         
-        # Try Google Translate first
-        result = translate_text(text, self.target_language)
+        # Check cache first
+        if cache_key in self._translation_cache:
+            return self._translation_cache[cache_key]
+        
+        # Use the selected API with context
+        result = translate_text(text, self.target_language, sentence, self.selected_api, self.api_key)
         if result:
-            self._translation_cache[text] = result
+            self._translation_cache[cache_key] = result
             return result
         
         # Fallback to local dictionary
         fallback_result = simple_translate_fallback(text, self.target_language)
-        self._translation_cache[text] = fallback_result
+        self._translation_cache[cache_key] = fallback_result
         return fallback_result
 
     def shutdown(self) -> None:
@@ -844,7 +1144,7 @@ class CaptionApp:
         self.target_language = target_language
         self.root = tk.Tk()
         self.root.title("Live Captions — Computer Vision Translator")
-        self.root.geometry("350x170")
+        self.root.geometry("350x170")  # Initial size without settings panel
         
         # Setup logging
         # Clean up old log files before creating new ones
@@ -857,13 +1157,20 @@ class CaptionApp:
         self.log_handle.write("=" * 80 + "\n\n")
         self.log_handle.flush()
 
-        # Simple layout - only translation display
+        # Layout with translation display and collapsible settings
         self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_rowconfigure(1, weight=0)  # Settings panel (fixed height)
         self.root.grid_columnconfigure(0, weight=1)
 
         # Translation display area
         self.translation_frame = ttk.Frame(self.root)
         self.translation_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        
+        # Settings panel (initially hidden)
+        self.settings_frame = ttk.LabelFrame(self.root, text="Settings", padding="10")
+        self.settings_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 10))
+        self.settings_frame.grid_remove()  # Hide initially
+        self.settings_visible = False
         
         # Translation labels
         self.word_translation_var = tk.StringVar(value="Click 'Show' to start word tracking")
@@ -916,12 +1223,33 @@ class CaptionApp:
         # Place next to Reverso button
         self.cambridge_button.place(relx=1.0, rely=0.0, anchor="ne", x=-170, y=10)
         
-        self.status_value = tk.StringVar(value="Ready - Click 'Show Live Caption' to start")
-        self.status_bar = ttk.Label(self.root, textvariable=self.status_value, anchor="w")
-        self.status_bar.grid(row=1, column=0, sticky="ew")
+        # Settings button (next to Cambridge button)
+        self.settings_button = tk.Button(
+            self.root,
+            text="Settings",
+            font=("Segoe UI", 8),
+            bg="lightgray",
+            fg="darkgray",
+            command=self._on_settings_clicked,
+            width=8,
+            height=1
+        )
+        # Place next to Cambridge button
+        self.settings_button.place(relx=1.0, rely=0.0, anchor="ne", x=-250, y=10)
+        
+
+        # API key configuration (must be before TranslatorService initialization)
+        self.api_key_file = "api_key.txt"
+        self.perplexity_api_key = self._load_api_key()
+        self.gemini_api_key = self._load_gemini_api_key()
+        self.selected_api = self._load_selected_api()  # "perplexity" or "gemini"
+
+        # Create settings panel now that API keys are available
+        self._create_settings_panel()
 
         # Services
-        self.translator = TranslatorService(target_language=self.target_language)
+        current_api_key = self.perplexity_api_key if self.selected_api == "perplexity" else self.gemini_api_key
+        self.translator = TranslatorService(target_language=self.target_language, api_key=current_api_key, selected_api=self.selected_api)
         self.word_detector: Optional[WordDetector] = None
         self.live_captions_window: Optional[gw.Win32Window] = None
         self.window_manager: Optional[WindowManager] = None
@@ -946,11 +1274,334 @@ class CaptionApp:
         self.current_original_word: Optional[str] = None
         self.current_translated_word: Optional[str] = None
         
+    def _create_settings_panel(self) -> None:
+        """Create the settings panel content with API selection and both API keys."""
+        # API Selection section
+        api_selection_label = ttk.Label(self.settings_frame, text="Select Translation API:")
+        api_selection_label.pack(anchor="w", pady=(0, 5))
+        
+        # API Selection radio buttons
+        self.api_selection_var = tk.StringVar(value=self.selected_api)
+        api_selection_frame = ttk.Frame(self.settings_frame)
+        api_selection_frame.pack(fill="x", pady=(0, 10))
+        
+        perplexity_radio = ttk.Radiobutton(api_selection_frame, text="Perplexity AI", 
+                                          variable=self.api_selection_var, value="perplexity",
+                                          command=self._on_api_selection_changed)
+        perplexity_radio.pack(side="left", padx=(0, 20))
+        
+        gemini_radio = ttk.Radiobutton(api_selection_frame, text="Gemini AI", 
+                                     variable=self.api_selection_var, value="gemini",
+                                     command=self._on_api_selection_changed)
+        gemini_radio.pack(side="left")
+        
+        # Perplexity API Key section
+        perplexity_label = ttk.Label(self.settings_frame, text="Perplexity API Key:")
+        perplexity_label.pack(anchor="w", pady=(0, 5))
+        
+        self.perplexity_api_var = tk.StringVar(value=self.perplexity_api_key)
+        self.perplexity_api_entry = ttk.Entry(self.settings_frame, textvariable=self.perplexity_api_var, 
+                                            width=40, show="*")
+        self.perplexity_api_entry.pack(fill="x", pady=(0, 5))
+        
+        # Gemini API Key section
+        gemini_label = ttk.Label(self.settings_frame, text="Gemini API Key:")
+        gemini_label.pack(anchor="w", pady=(0, 5))
+        
+        self.gemini_api_var = tk.StringVar(value=self.gemini_api_key)
+        self.gemini_api_entry = ttk.Entry(self.settings_frame, textvariable=self.gemini_api_var, 
+                                        width=40, show="*")
+        self.gemini_api_entry.pack(fill="x", pady=(0, 10))
+        
+        # Help text
+        help_text = ttk.Label(self.settings_frame, 
+                             text="Perplexity: https://www.perplexity.ai/settings/api\nGemini: https://makersuite.google.com/app/apikey",
+                             font=("Segoe UI", 8),
+                             foreground="gray")
+        help_text.pack(anchor="w", pady=(0, 10))
+        
+        # Buttons frame
+        buttons_frame = ttk.Frame(self.settings_frame)
+        buttons_frame.pack(fill="x")
+        
+        # Save button
+        save_button = ttk.Button(buttons_frame, text="Save & Test", command=self._save_all_settings)
+        save_button.pack(side="left", padx=(0, 5))
+        
+        # Close settings button
+        close_button = ttk.Button(buttons_frame, text="Close", command=self._toggle_settings)
+        close_button.pack(side="right")
+        
+    def _load_api_key(self) -> str:
+        """Load API key from secure encrypted file or return default."""
+        try:
+            secure_file = "api_key.secure"
+            if os.path.exists(secure_file):
+                api_key = secure_storage.load_secure_file(secure_file)
+                if api_key:
+                    print(f"Loaded encrypted API key from {secure_file}")
+                    return api_key
+            
+            # Fallback to old unencrypted file for migration
+            if os.path.exists(self.api_key_file):
+                with open(self.api_key_file, 'r', encoding='utf-8') as f:
+                    api_key = f.read().strip()
+                    if api_key:
+                        print(f"Migrating API key from {self.api_key_file} to secure storage")
+                        # Migrate to secure storage
+                        secure_storage.save_secure_file(secure_file, api_key)
+                        # Remove old file
+                        os.remove(self.api_key_file)
+                        return api_key
+        except Exception as e:
+            print(f"Error loading API key: {e}")
+        
+        # Return empty string if no secure file exists
+        print("No API key found - please configure in settings")
+        return ""
+
+    def _load_gemini_api_key(self) -> str:
+        """Load Gemini API key from secure encrypted file."""
+        try:
+            secure_file = "gemini_api_key.secure"
+            if os.path.exists(secure_file):
+                api_key = secure_storage.load_secure_file(secure_file)
+                if api_key:
+                    print(f"Loaded encrypted Gemini API key from {secure_file}")
+                    return api_key
+            
+            # Fallback to old unencrypted file for migration
+            old_file = "gemini_api_key.txt"
+            if os.path.exists(old_file):
+                with open(old_file, 'r', encoding='utf-8') as f:
+                    api_key = f.read().strip()
+                    if api_key:
+                        print(f"Migrating Gemini API key from {old_file} to secure storage")
+                        # Migrate to secure storage
+                        secure_storage.save_secure_file(secure_file, api_key)
+                        # Remove old file
+                        os.remove(old_file)
+                        return api_key
+        except Exception as e:
+            print(f"Error loading Gemini API key: {e}")
+        
+        # Return empty string if file doesn't exist or is empty (don't use invalid default)
+        print("No Gemini API key found - field will be empty")
+        return ""
+
+    def _load_selected_api(self) -> str:
+        """Load selected API from secure encrypted file."""
+        try:
+            secure_file = "api_selection.secure"
+            if os.path.exists(secure_file):
+                selected = secure_storage.load_secure_file(secure_file)
+                if selected and selected.lower() in ["perplexity", "gemini"]:
+                    print(f"Loaded encrypted API selection: {selected}")
+                    return selected.lower()
+            
+            # Fallback to old unencrypted file for migration
+            old_file = "api_selection.txt"
+            if os.path.exists(old_file):
+                with open(old_file, 'r', encoding='utf-8') as f:
+                    selected = f.read().strip().lower()
+                    if selected in ["perplexity", "gemini"]:
+                        print(f"Migrating API selection from {old_file} to secure storage")
+                        # Migrate to secure storage
+                        secure_storage.save_secure_file(secure_file, selected)
+                        # Remove old file
+                        os.remove(old_file)
+                        return selected
+        except Exception as e:
+            print(f"Error loading API selection: {e}")
+        
+        # Default to Perplexity
+        print("Using default API selection: perplexity")
+        return "perplexity"
+    
+    def _save_api_key(self, api_key: str) -> bool:
+        """Save API key to secure encrypted file."""
+        try:
+            secure_file = "api_key.secure"
+            if secure_storage.save_secure_file(secure_file, api_key):
+                print(f"API key saved to secure encrypted file: {secure_file}")
+                return True
+            else:
+                print("Failed to save API key to secure storage")
+                return False
+        except Exception as e:
+            print(f"Error saving API key: {e}")
+            return False
+
+    def _save_gemini_api_key(self, api_key: str) -> bool:
+        """Save Gemini API key to secure encrypted file."""
+        try:
+            secure_file = "gemini_api_key.secure"
+            if secure_storage.save_secure_file(secure_file, api_key):
+                print(f"Gemini API key saved to secure encrypted file: {secure_file}")
+                return True
+            else:
+                print("Failed to save Gemini API key to secure storage")
+                return False
+        except Exception as e:
+            print(f"Error saving Gemini API key: {e}")
+            return False
+
+    def _save_selected_api(self, selected_api: str) -> bool:
+        """Save selected API to secure encrypted file."""
+        try:
+            secure_file = "api_selection.secure"
+            if secure_storage.save_secure_file(secure_file, selected_api.lower()):
+                print(f"API selection saved to secure encrypted file: {secure_file}")
+                return True
+            else:
+                print("Failed to save API selection to secure storage")
+                return False
+        except Exception as e:
+            print(f"Error saving API selection: {e}")
+            return False
+    
+    def _toggle_settings(self) -> None:
+        """Toggle the settings panel visibility."""
+        if self.settings_visible:
+            self.settings_frame.grid_remove()
+            self.settings_visible = False
+            # Resize window back to original size
+            self.root.geometry("350x170")
+        else:
+            self.settings_frame.grid()
+            self.settings_visible = True
+            # Resize window to accommodate settings
+            self.root.geometry("350x350")
+    
+    def _on_api_selection_changed(self) -> None:
+        """Handle API selection change."""
+        selected = self.api_selection_var.get()
+        print(f"API selection changed to: {selected}")
+    
+    def _save_all_settings(self) -> None:
+        """Save all settings including API selection and both API keys with validation."""
+        # Save API selection first
+        selected_api = self.api_selection_var.get()
+        if not self._save_selected_api(selected_api):
+            tk.messagebox.showerror("Error", "Failed to save API selection!")
+            return
+        
+        # Only validate the API key for the currently selected API
+        validated_keys = []
+        
+        if selected_api == "perplexity":
+            # Validate Perplexity API key if provided
+            perplexity_key = self.perplexity_api_var.get().strip()
+            if perplexity_key:
+                try:
+                    result = self._test_perplexity_api(perplexity_key)
+                    if result:
+                        if self._save_api_key(perplexity_key):
+                            self.perplexity_api_key = perplexity_key
+                            validated_keys.append("Perplexity")
+                            print(f"Perplexity API key saved and validated: 'test' -> '{result}'")
+                        else:
+                            tk.messagebox.showerror("Error", "Failed to save Perplexity API key!")
+                            return
+                    else:
+                        tk.messagebox.showerror("Error", "Perplexity API key is invalid! Please check your key and try again.")
+                        return
+                except Exception as e:
+                    tk.messagebox.showerror("Error", f"Perplexity API key test failed: {e}")
+                    return
+            else:
+                tk.messagebox.showerror("Error", "Please enter a Perplexity API key!")
+                return
+                
+        elif selected_api == "gemini":
+            # Validate Gemini API key if provided
+            gemini_key = self.gemini_api_var.get().strip()
+            if gemini_key:
+                try:
+                    result = self._test_gemini_api(gemini_key)
+                    if result:
+                        if self._save_gemini_api_key(gemini_key):
+                            self.gemini_api_key = gemini_key
+                            validated_keys.append("Gemini")
+                            print(f"Gemini API key saved and validated: 'test' -> '{result}'")
+                        else:
+                            tk.messagebox.showerror("Error", "Failed to save Gemini API key!")
+                            return
+                    else:
+                        tk.messagebox.showerror("Error", "Gemini API key is invalid! Please check your key and try again.")
+                        return
+                except Exception as e:
+                    tk.messagebox.showerror("Error", f"Gemini API key test failed: {e}")
+                    return
+            else:
+                tk.messagebox.showerror("Error", "Please enter a Gemini API key!")
+                return
+        
+        # Update selected API and translator service
+        self.selected_api = selected_api
+        current_api_key = self.perplexity_api_key if selected_api == "perplexity" else self.gemini_api_key
+        
+        # Update translator service
+        self.translator.api_key = current_api_key
+        self.translator.selected_api = selected_api
+        
+        # Show success message
+        success_msg = f"Settings saved successfully! Using {selected_api.title()} API."
+        if validated_keys:
+            success_msg += f"\nValidated API key: {', '.join(validated_keys)}"
+        
+        tk.messagebox.showinfo("Success", success_msg)
+        
+        # Automatically close settings panel after successful save
+        self._toggle_settings()
+    
+    def _test_gemini_api(self, api_key: str) -> Optional[str]:
+        """Test Gemini API key."""
+        try:
+            result = _translate_with_gemini("test", "ru", "", api_key)
+            return result
+        except Exception as e:
+            print(f"Gemini API test failed: {e}")
+            return None
+    
+    def _on_settings_clicked(self) -> None:
+        """Handle the settings button click - toggle settings panel."""
+        self._toggle_settings()
+        
+    def _test_perplexity_api(self, api_key: str) -> Optional[str]:
+        """Test the Perplexity API with a given key."""
+        try:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "model": "sonar-pro",
+                "messages": [
+                    {"role": "system", "content": "You are a professional translator. Translate English text to Russian accurately and naturally."},
+                    {"role": "user", "content": "Translate the following English text to Russian. Provide only the translation without any additional explanations or formatting. Text to translate: test"}
+                ],
+                "max_tokens": 50,
+                "temperature": 0.1
+            }
+            
+            response = requests.post(PERPLEXITY_API_URL, headers=headers, json=data, timeout=10)
+            
+            if response.status_code == 200:
+                result = response.json()["choices"][0]["message"]["content"].strip()
+                return result if result else None
+            else:
+                return None
+                
+        except Exception as e:
+            print(f"API test error: {e}")
+            return None
+        
     def _on_toggle_caption_clicked(self) -> None:
         """Handle the toggle button click - show/hide Live Captions and word detection."""
         if not self.cv_initialized:
             # First try to launch LiveCaptions.exe
-            self.status_value.set("Launching LiveCaptions.exe...")
             self.show_caption_button.config(state="disabled", text="Launching...", bg="orange")
             self.root.update()
             
@@ -961,7 +1612,6 @@ class CaptionApp:
                 self._initialize_cv_system()
             else:
                 # Fallback to the original method if LiveCaptions.exe launch fails
-                self.status_value.set("LiveCaptions.exe not found, using Windows Live Captions...")
                 self.root.update()
                 time.sleep(1)
                 self._initialize_cv_system()
@@ -995,7 +1645,6 @@ class CaptionApp:
 
     def _initialize_cv_system(self) -> None:
         """Initialize the computer vision system and Live Captions window."""
-        self.status_value.set("Initializing Live Captions...")
         self.show_caption_button.config(state="disabled", text="Starting...", bg="orange")
         self.root.update()
         
@@ -1038,7 +1687,6 @@ class CaptionApp:
             print("Computer vision thread started")
             
             # Update UI
-            self.status_value.set("Live Captions active - Click on words to translate")
             self.word_translation_var.set("Click on words in the Live Captions window to see translations")
             self.show_caption_button.config(
                 state="normal", 
@@ -1048,7 +1696,6 @@ class CaptionApp:
             )
             
         except Exception as e:
-            self.status_value.set(f"Error: {e}")
             self.show_caption_button.config(
                 state="normal", 
                 text="Show",
@@ -1075,7 +1722,6 @@ class CaptionApp:
                 self.window_manager.move_window(current_x, -2000)
             
             # Update UI
-            self.status_value.set("Live Captions hidden - Click 'Show' to start")
             self.word_translation_var.set("Click 'Show' to start word tracking")
             self.show_caption_button.config(
                 text="Show",
@@ -1105,7 +1751,6 @@ class CaptionApp:
                 print("Computer vision thread restarted")
             
             # Update UI
-            self.status_value.set("Live Captions active - Click on words to translate")
             self.word_translation_var.set("Click on words in the Live Captions window to see translations")
             self.show_caption_button.config(
                 text="Hide",
@@ -1207,9 +1852,9 @@ class CaptionApp:
                 print(f"Error in computer vision loop: {e}")
                 time.sleep(1)
         
-    def _on_word_selected(self, word: str) -> None:
-        """Handle word selection and trigger translation."""
-        print(f"Word selected for translation: '{word}'")
+    def _on_word_selected(self, word: str, sentence: str = "") -> None:
+        """Handle word selection and trigger translation with sentence context."""
+        print(f"Word selected for translation: '{word}' from sentence: '{sentence}'")
         if not word:
             return
             
@@ -1217,9 +1862,9 @@ class CaptionApp:
         self.word_translation_var.set(f"{word} → translating...")
         print(f"UI updated with: {word} → translating...")
         
-        # Start translation in background
-        word_future = self.translator.translate_async(word)
-        print(f"Translation started for: '{word}'")
+        # Start translation in background with sentence context
+        word_future = self.translator.translate_async(word, sentence)
+        print(f"Translation started for: '{word}' with context: '{sentence}'")
 
         def on_translation_done(fut: Future) -> None:
             try:
